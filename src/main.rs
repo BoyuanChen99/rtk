@@ -325,7 +325,8 @@ enum Commands {
         // No short: `-l` is grep's --files-with-matches. Bound to a `usize` it
         // accepted numeric patterns -- `rtk grep -l 8080 a.txt b.txt` set
         // max_len=8080, took a.txt as the pattern, and returned empty output
-        // with no error.
+        // with no error. Without the short, `-l`/`-L` flow to extra_args where
+        // has_format_flag routes them to the grep passthrough (GNU semantics).
         #[arg(long, default_value = "80")]
         max_len: usize,
         /// Max results to show
@@ -3266,6 +3267,30 @@ mod tests {
             } => {
                 assert_eq!(max, 200, "max must stay at its default, not consume `-m`");
                 assert_eq!(extra_args, vec!["-m", "5", "pattern", "file"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_grep_dash_l_is_files_with_matches() {
+        // Regression: `-l` is GNU grep's --files-with-matches, not RTK's
+        // --max-len. It must parse (not error as an invalid usize), keep
+        // max_len at its default, and reach extra_args so has_format_flag
+        // routes it to the raw-grep passthrough.
+        let cli = Cli::try_parse_from(["rtk", "grep", "-l", "tenant_id", "src/"]).unwrap();
+
+        match cli.command {
+            Commands::Grep {
+                max_len,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(
+                    max_len, 80,
+                    "max_len must stay default, not eat the pattern"
+                );
+                assert_eq!(extra_args, vec!["-l", "tenant_id", "src/"]);
             }
             _ => panic!("Expected Grep command"),
         }
