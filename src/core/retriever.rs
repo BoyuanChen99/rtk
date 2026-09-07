@@ -43,6 +43,8 @@ pub struct RetrieverConfig {
     pub tee_max_file_size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tee_directory: Option<PathBuf>,
+    /// Legacy `[tee] mode = "always"`: archive successful runs too. Tee mode only.
+    pub tee_on_success: bool,
 }
 
 impl Default for RetrieverConfig {
@@ -57,6 +59,7 @@ impl Default for RetrieverConfig {
             tee_max_files: DEFAULT_TEE_MAX_FILES,
             tee_max_file_size: DEFAULT_TEE_MAX_FILE_SIZE,
             tee_directory: None,
+            tee_on_success: false,
         }
     }
 }

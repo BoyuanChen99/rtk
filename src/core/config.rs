@@ -80,6 +80,7 @@ struct LegacyTeeConfig {
 
 struct LegacyMapping {
     mode: Option<crate::core::retriever::RecoveryMode>,
+    tee_on_success: Option<bool>,
     tee_max_files: Option<usize>,
     tee_max_file_size: Option<usize>,
     tee_directory: Option<PathBuf>,
@@ -104,6 +105,8 @@ fn map_legacy_tee(
     };
     LegacyMapping {
         mode,
+        tee_on_success: (tee.mode.as_deref() == Some("always") && !explicit("tee_on_success"))
+            .then_some(true),
         tee_max_files: tee.max_files.filter(|_| !explicit("tee_max_files")),
         tee_max_file_size: tee.max_file_size.filter(|_| !explicit("tee_max_file_size")),
         tee_directory: tee.directory.clone().filter(|_| !explicit("tee_directory")),
@@ -309,6 +312,9 @@ impl Config {
                 self.migrated_from_legacy_tee = true;
             }
         }
+        if let Some(v) = mapping.tee_on_success {
+            r.tee_on_success = v;
+        }
         let merged = mapping.tee_max_files.is_some()
             || mapping.tee_max_file_size.is_some()
             || mapping.tee_directory.is_some();
@@ -405,6 +411,9 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
         }
         if let Some(d) = mapping.tee_directory {
             doc["retriever"]["tee_directory"] = toml_edit::value(d.to_string_lossy().as_ref());
+        }
+        if mapping.tee_on_success == Some(true) {
+            doc["retriever"]["tee_on_success"] = toml_edit::value(true);
         }
     }
     Ok(doc.to_string())
@@ -701,10 +710,25 @@ enabled = false
     }
 
     #[test]
-    fn test_legacy_always_mode_maps_to_plain_tee() {
+    fn test_legacy_always_is_preserved_not_downgraded() {
         use crate::core::retriever::RecoveryMode;
         let config = Config::from_toml("[tee]\nmode = \"always\"\n").expect("valid");
         assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert!(
+            config.retriever.tee_on_success,
+            "legacy always must keep archiving successful runs"
+        );
+        let failures = Config::from_toml("[tee]\nmode = \"failures\"\n").expect("valid");
+        assert!(!failures.retriever.tee_on_success);
+        let rewritten = apply_recall_mode("[tee]\nmode = \"always\"\n", RecoveryMode::Tee)
+            .expect("valid rewrite");
+        assert!(
+            Config::from_toml(&rewritten)
+                .unwrap()
+                .retriever
+                .tee_on_success,
+            "rtk config recall must carry the always intent over too"
+        );
     }
 
     #[test]
