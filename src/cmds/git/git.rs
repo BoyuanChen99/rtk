@@ -303,32 +303,11 @@ fn run_diff(
     // header to be stat-only whatever the user asked for -- `git diff --stat -p` (or -U3, -W,
     // ...) emits the patch too, and RTK then printed it again, compacted, for 2.4x the raw
     // output. The flags go before the user's own `--`, where git still reads them as options.
-    let mut cmd = git_cmd(global_args);
-    cmd.args(["diff", "--no-patch", "--stat"]);
-    for arg in args_without_patch_shape(args, &tokens) {
-        cmd.arg(arg);
-    }
-
-    let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
-
-    if !result.success() {
-        if !result.stderr.trim().is_empty() {
-            eprint!("{}", result.stderr);
-        }
-        timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {}", args.join(" ")),
-            &result.stdout,
-            &result.stdout,
-        );
-        return Ok(result.exit_code);
-    }
-
-    if verbose > 0 {
-        eprintln!("Git diff summary:");
-    }
-
-    // Now get actual diff but compact it
+    // The user's own command runs first, because only it can give git's verdict on what they
+    // typed. The stat header below runs with the patch-shape flags stripped, so it answers a
+    // *different* command: `git diff -Uabc nonexistent-ref` is `error: --unified expects a
+    // numerical value` (129) to git, and the stripped probe reported `ambiguous argument` (128)
+    // instead. A probe is decoration; it must never be the thing that reports failure.
     let mut diff_cmd = git_cmd(global_args);
     diff_cmd.arg("diff");
     for arg in args {
@@ -337,9 +316,6 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    // git's verdict on the command as the user typed it. The stat probe above ran with the
-    // patch-shape flags stripped, so it succeeds on things git refuses -- `git diff -Uabc`
-    // exits 129 raw, and compacting the empty result reported success with a tidy diffstat.
     if !diff_result.success() {
         if !diff_result.stderr.trim().is_empty() {
             eprint!("{}", diff_result.stderr);
@@ -353,8 +329,24 @@ fn run_diff(
         return Ok(diff_result.exit_code);
     }
 
+    // `--no-patch --stat` forces the header to be stat-only whatever the user asked for --
+    // `git diff --stat -p` (or -U3, -W, ...) emits the patch too, and RTK then printed it
+    // again, compacted, for 2.4x the raw output. The flags go before the user's own `--`,
+    // where git still reads them as options. A failure here costs the header, not the command.
+    let mut cmd = git_cmd(global_args);
+    cmd.args(["diff", "--no-patch", "--stat"]);
+    for arg in args_without_patch_shape(args, &tokens) {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+
+    if verbose > 0 {
+        eprintln!("Git diff summary:");
+    }
+
     let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
+        let compacted = compact_diff(&strip_ansi(&diff_result.stdout), max_lines.unwrap_or(500));
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
     } else {
         result.stdout.trim().to_string()
@@ -549,7 +541,7 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
+        let compacted = compact_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500));
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -1075,16 +1067,32 @@ const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
 /// positionals ("fatal: -10 option must come before non-option arguments") and a pathspec needs
 /// no boundary to be one. Only the limit is injected -- `--no-merges` would gut `--cc`/`-c`,
 /// whose entire purpose is the merge diff.
-fn raw_log_passthrough_args(args: &[String], tokens: &[Token<'_>]) -> Vec<OsString> {
+fn raw_log_passthrough_args(args: &[String], capped: bool) -> Vec<OsString> {
     let mut out = vec![OsString::from("log")];
-    if !has_limit_flag(tokens) && !bounds_the_walk(tokens) {
-        // Say so. This streams straight to the terminal, so unlike the compacted path there is
-        // no footer and no tee to notice the missing commits from.
-        eprintln!("[rtk] showing {} commits; pass -n <count> for more", DEFAULT_LOG_LIMIT);
+    if capped {
         out.push(OsString::from(DEFAULT_LOG_LIMIT_ARG));
     }
     out.extend(args.iter().map(OsString::from));
     out
+}
+
+/// True when RTK's default limit applies: the user named no limit of their own and did not
+/// bound the walk with a revision range.
+fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
+    !has_limit_flag(tokens) && !bounds_the_walk(tokens)
+}
+
+/// How many commits a default-format `git log` printed. `None` when the format is not the
+/// default one, which is when RTK cannot tell and says nothing rather than guessing.
+fn count_default_format_commits(stdout: &str) -> Option<usize> {
+    let n = stdout
+        .lines()
+        .filter(|line| {
+            line.strip_prefix("commit ")
+                .is_some_and(|rest| rest.len() >= 7 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .count();
+    (n > 0).then_some(n)
 }
 
 /// True when the arguments already bound the walk, so RTK's default limit would only take away
@@ -1111,7 +1119,39 @@ fn run_log(
     let tokens = tokenize_git_log_args(args);
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
-        return run_passthrough(&raw_log_passthrough_args(args, &tokens), global_args, verbose);
+        let capped = raw_log_is_capped(&tokens);
+        let passthrough_args = raw_log_passthrough_args(args, capped);
+        if !capped {
+            return run_passthrough(&passthrough_args, global_args, verbose);
+        }
+        // Capped, so the output is bounded and worth capturing: it is the only way to say
+        // whether the limit actually took anything away. Announcing it up-front announced a
+        // truncation that had not happened, on a two-commit repo, and announced it ahead of
+        // commands git then rejected outright.
+        let timer = tracking::TimedExecution::start();
+        let mut cmd = git_cmd(global_args);
+        cmd.args(&passthrough_args);
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        print!("{}", result.stdout);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        timer.track(
+            &format!("git log {}", args.join(" ")),
+            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+        if !result.success() {
+            return Ok(result.exit_code);
+        }
+        if count_default_format_commits(&result.stdout) == Some(DEFAULT_LOG_LIMIT) {
+            eprintln!(
+                "[rtk] showing {} commits; pass -n <count> for more",
+                DEFAULT_LOG_LIMIT
+            );
+        }
+        return Ok(0);
     }
 
     let timer = tracking::TimedExecution::start();
@@ -4675,7 +4715,7 @@ A  added.rs
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_log_args(&owned);
             assert!(tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)), "{args:?} must route raw");
-            raw_log_passthrough_args(&owned, &tokens)
+            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -4749,7 +4789,7 @@ A  added.rs
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_log_args(&owned);
-            raw_log_passthrough_args(&owned, &tokens)
+            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
                 .iter()
                 .any(|a| a == DEFAULT_LOG_LIMIT_ARG)
         };
