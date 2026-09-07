@@ -72,7 +72,7 @@ RTK が報告するトークン数は `バイト数 / 4` で見積もられて�
 brew install rtk
 ```
 
-### winget（Windows — 最も簡単）
+### winget（Windows）
 
 Windowsで最も簡単なインストール方法 — コマンド1つ、PATHの設定不要：
 

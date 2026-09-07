@@ -72,7 +72,7 @@ Los recuentos de tokens que reporta RTK se estiman como `bytes / 4`: RTK no incl
 brew install rtk
 ```
 
-### winget (Windows — la mas facil)
+### winget (Windows)
 
 La forma mas facil de instalar en Windows — un solo comando, sin configuracion de PATH:
 

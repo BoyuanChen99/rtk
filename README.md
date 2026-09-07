@@ -371,7 +371,9 @@ By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "hig
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
-### Native Windows (manual install, see `winget` section up top for easiest method)
+### Native Windows (manual install)
+
+Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases

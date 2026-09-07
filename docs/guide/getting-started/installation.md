@@ -37,6 +37,12 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 brew install rtk-ai/tap/rtk
 ```
 
+## winget (Windows)
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ## Cargo
 
 :::caution[Name collision risk]
@@ -92,4 +98,5 @@ rtk init --global
 rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
+winget uninstall rtk-ai.rtk # remove binary (if installed via winget)
 ```
