@@ -1,6 +1,6 @@
 //! Content-addressed recall store backing `rtk recall`.
 
-use super::constants::{RECALL_DB, RTK_DATA_DIR};
+use super::constants::RECALL_DB;
 use crate::core::config::Config;
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -172,9 +172,15 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     if let Some(ref p) = cfg.database_path {
         return Ok(p.clone());
     }
-    let data_dir = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?;
-    Ok(data_dir.join(RTK_DATA_DIR).join(RECALL_DB))
+    // A test that names no store must never reach the developer's own: its rows
+    // would ship as real usage through the telemetry ping.
+    #[cfg(test)]
+    let base = std::env::temp_dir().join(format!("rtk-test-store-{}", std::process::id()));
+    #[cfg(not(test))]
+    let base = dirs::data_local_dir()
+        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?
+        .join(super::constants::RTK_DATA_DIR);
+    Ok(base.join(RECALL_DB))
 }
 
 fn open(cfg: &RetrieverConfig) -> Result<Connection> {
@@ -459,18 +465,30 @@ fn store_inner(
     exit_code: Option<i32>,
     shown_upto: usize,
 ) -> Result<StoredRef> {
-    let (payload, truncated) = if content.len() > cfg.max_entry_bytes {
-        let cap = cfg.max_entry_bytes;
-        let cut = content[..cap]
+    let cap = cfg.max_entry_bytes;
+    let cut_at_line = |slice: &[u8]| {
+        slice[..cap]
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|i| i + 1)
-            .unwrap_or(cap);
-        (&content[..cut], true)
+            .unwrap_or(cap)
+    };
+    // Over the cap the store keeps the hidden tail rather than the prefix the
+    // agent already saw, so the hint can never promise more than recall returns.
+    let (payload, stored_shown_upto, truncated) = if content.len() <= cap {
+        (content, shown_upto, false)
+    } else if shown_upto > 1 {
+        let hidden = slice_from_line(content, shown_upto);
+        if hidden.len() > cap {
+            (&hidden[..cut_at_line(hidden)], 1, true)
+        } else {
+            (hidden, 1, true)
+        }
     } else {
-        (content, false)
+        (&content[..cut_at_line(content)], 1, true)
     };
     let total_lines = count_lines(payload);
+    let shown_upto = stored_shown_upto;
     let hash = content_hash(command, content);
     let (blob, codec): (Vec<u8>, &str) = if cfg.compression {
         match gzip(payload) {
@@ -658,8 +676,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
 
     if out.is_empty() && row.truncated && args.grep.is_none() {
         eprintln!(
-            "rtk recall: the requested lines were lost to the {}-byte storage cap (entry stored truncated)",
-            cfg.max_entry_bytes
+            "rtk recall: the requested lines were lost — this entry was stored truncated at the cap in force at the time"
         );
         return Ok(1);
     }
@@ -669,8 +686,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
 
     if row.truncated {
         eprintln!(
-            "rtk recall: note: output exceeded the {}-byte cap and was stored truncated",
-            cfg.max_entry_bytes
+            "rtk recall: note: this entry was stored truncated (output exceeded the cap in force at the time)"
         );
     }
     Ok(0)
@@ -678,7 +694,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
 
 fn list_entries(conn: &Connection) -> Result<i32> {
     let mut stmt = conn.prepare(
-        "SELECT hash, command, total_lines, shown_upto, exit_code, truncated \
+        "SELECT hash, command, total_lines, shown_upto, exit_code, truncated, byte_size \
          FROM recall ORDER BY created_at DESC LIMIT 50",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -689,16 +705,17 @@ fn list_entries(conn: &Connection) -> Result<i32> {
             r.get::<_, i64>(3)?,
             r.get::<_, Option<i64>>(4)?,
             r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
         ))
     })?;
 
     println!(
-        "{:<14} {:<26} {:>7} {:>7} {:>5} TRUNC",
-        "HASH", "COMMAND", "LINES", "HIDDEN", "EXIT"
+        "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
+        "HASH", "COMMAND", "LINES", "HIDDEN", "ORIG", "EXIT"
     );
     let mut n = 0;
     for row in rows {
-        let (hash, command, total, shown, exit, truncated) = row?;
+        let (hash, command, total, shown, exit, truncated, byte_size) = row?;
         let hidden = total.saturating_sub(shown.saturating_sub(1)).max(0);
         let cmd = if command.chars().count() > 26 {
             let head: String = command.chars().take(25).collect();
@@ -707,11 +724,12 @@ fn list_entries(conn: &Connection) -> Result<i32> {
             command
         };
         println!(
-            "{:<14} {:<26} {:>7} {:>7} {:>5} {}",
+            "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
             hash,
             cmd,
             total,
             hidden,
+            crate::core::utils::format_tokens(byte_size.max(0) as usize),
             exit.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
             if truncated != 0 { "yes" } else { "" }
         );
@@ -887,7 +905,63 @@ mod tests {
     }
 
     #[test]
-    fn test_no_tail_hint_when_truncation_leaves_nothing_recallable() {
+    fn test_truncation_prefers_hidden_over_already_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entry_bytes: 400,
+            ..temp_cfg(dir.path())
+        };
+        let content: Vec<u8> = (0..200)
+            .flat_map(|i| format!("line {i:03} padding padding\n").into_bytes())
+            .collect();
+        let stored = store_inner(&cfg, &content, "cmd", None, 150).unwrap();
+        assert!(
+            stored.hidden_lines > 0,
+            "a cap that cannot hold the shown prefix must still store the hidden tail"
+        );
+        let conn = open(&cfg).unwrap();
+        let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
+        let delta = slice_from_line(&decode(&row).unwrap(), row.shown_upto).to_vec();
+        assert_eq!(
+            count_lines(&delta),
+            stored.hidden_lines,
+            "promise must equal what recall returns"
+        );
+        assert!(
+            String::from_utf8_lossy(&delta).starts_with("line 149"),
+            "stored window must begin at the first hidden line, got: {}",
+            String::from_utf8_lossy(&delta[..30.min(delta.len())])
+        );
+    }
+
+    #[test]
+    fn test_list_reports_true_size_not_just_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entry_bytes: 400,
+            ..temp_cfg(dir.path())
+        };
+        let content: Vec<u8> = (0..300)
+            .flat_map(|i| format!("line {i:03} padding padding\n").into_bytes())
+            .collect();
+        let stored = store_inner(&cfg, &content, "cmd", None, 20).unwrap();
+        let conn = open(&cfg).unwrap();
+        let byte_size: i64 = conn
+            .query_row(
+                "SELECT byte_size FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            byte_size,
+            content.len() as i64,
+            "byte_size must keep the true original size for --list to surface"
+        );
+    }
+
+    #[test]
+    fn test_tiny_cap_still_yields_a_recallable_hidden_line() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = RetrieverConfig {
             max_entry_bytes: 40,
@@ -897,10 +971,14 @@ mod tests {
             .flat_map(|i| format!("line {i:03} padding\n").into_bytes())
             .collect();
         let stored = store_inner(&cfg, &content, "cmd", None, 50).unwrap();
-        assert_eq!(
-            stored.hidden_lines, 0,
-            "nothing recallable past shown_upto must yield zero hidden"
+        assert!(
+            stored.hidden_lines > 0,
+            "even a tiny cap keeps hidden content, so callers never see a None hint"
         );
+        let conn = open(&cfg).unwrap();
+        let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
+        let delta = slice_from_line(&decode(&row).unwrap(), row.shown_upto).to_vec();
+        assert_eq!(count_lines(&delta), stored.hidden_lines);
     }
 
     #[test]
