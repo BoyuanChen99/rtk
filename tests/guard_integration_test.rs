@@ -482,3 +482,120 @@ fn git_checkout_dirty_tree_error_keeps_file_list() {
         "dirty checkout failure should keep abort line: {combined:?}"
     );
 }
+
+/// A repo with one commit and one working-tree change, for the diff/show routing tests below.
+fn repo_with_a_change() -> tempfile::TempDir {
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("a.txt"), "l1\nl2\nl3\n").expect("write");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c1"]);
+    std::fs::write(dir.path().join("a.txt"), "l1\nl2 CHANGED\nl3\n").expect("write");
+    dir
+}
+
+#[test]
+fn git_diff_reports_the_error_git_gives_for_what_was_typed() {
+    // RTK also runs a stat probe with the patch-shape flags stripped, so that probe answers a
+    // different command: git rejects `-Uabc` (129) while the stripped probe got as far as the
+    // unknown ref and said `ambiguous argument` (128). A probe must never be what reports.
+    let dir = repo_with_a_change();
+
+    let (_, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "diff", "-Uabc", "nonexistent-ref"]);
+    assert_eq!(code, Some(129), "git's own code for the first bad flag");
+    assert!(
+        stderr.contains("--unified"),
+        "expected git's --unified complaint, got: {stderr:?}"
+    );
+
+    // Each alone still reports its own error.
+    let (_, _, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "-Uabc"]);
+    assert_eq!(code, Some(129));
+    let (_, _, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "nonexistent-ref"]);
+    assert_eq!(code, Some(128));
+}
+
+#[test]
+fn git_diff_keeps_the_body_when_git_colours_it() {
+    // Colour puts an escape at column 0, where the compaction looks for `diff --git` and `@@`,
+    // so the body silently came back empty. RTK renders its own output, so the colour was
+    // never going to survive compaction and is stripped before parsing.
+    let dir = repo_with_a_change();
+
+    for args in [
+        &["git", "diff", "--color"][..],
+        &["git", "diff", "--color", "--unified=0"][..],
+        &["git", "diff", "--color=always"][..],
+    ] {
+        let (stdout, _, code) = rtk_output_in_dir(dir.path(), args);
+        assert_eq!(code, Some(0), "{args:?}");
+        assert!(
+            stdout.contains("CHANGED"),
+            "{args:?} lost the body: {stdout:?}"
+        );
+    }
+
+    // The same escape arrives from config, where no argument inspection could have seen it.
+    git_in_dir(dir.path(), &["config", "color.ui", "always"]);
+    let (stdout, _, _) = rtk_output_in_dir(dir.path(), &["git", "diff"]);
+    assert!(
+        stdout.contains("CHANGED"),
+        "color.ui=always lost the body: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_log_announces_its_limit_only_when_the_limit_took_something() {
+    // The notice exists because that path streams and has no footer to notice missing commits
+    // from. It must not claim a truncation that did not happen, nor precede a command git
+    // rejects outright.
+    let dir = repo_with_a_change();
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c2"]);
+
+    let (_, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "--stat"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        !stderr.contains("[rtk]"),
+        "two commits, limit of ten: nothing was truncated, but got: {stderr:?}"
+    );
+
+    let (_, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "-pq"]);
+    assert_ne!(code, Some(0), "git rejects -q for log");
+    assert!(
+        !stderr.contains("[rtk]"),
+        "no notice ahead of a command git refuses: {stderr:?}"
+    );
+}
+
+#[test]
+fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
+    // git 2.53: `-s`/`--no-patch` fold in order against a patch request, `--quiet` never wins
+    // over one. Modelling all three the same way dropped a patch that was asked for.
+    let dir = repo_with_a_change();
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c2"]);
+
+    for args in [
+        &["git", "show", "--quiet", "-p"][..],
+        &["git", "show", "-p", "--quiet"][..],
+        &["git", "show", "-s", "-p"][..],
+    ] {
+        let (stdout, _, _) = rtk_output_in_dir(dir.path(), args);
+        assert!(
+            stdout.contains("CHANGED"),
+            "{args:?} should print the body: {stdout:?}"
+        );
+    }
+    for args in [
+        &["git", "show", "--quiet"][..],
+        &["git", "show", "-s"][..],
+        &["git", "show", "-p", "-s"][..],
+    ] {
+        let (stdout, _, _) = rtk_output_in_dir(dir.path(), args);
+        assert!(
+            !stdout.contains("CHANGED"),
+            "{args:?} should suppress the body: {stdout:?}"
+        );
+    }
+}
