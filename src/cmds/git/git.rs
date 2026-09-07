@@ -160,16 +160,37 @@ fn suppresses_diff_body(token: &Token<'_>) -> bool {
 /// `--no-patch` and `--quiet` lose to a *later* `-p`/`--patch`/`-U<n>` and win over an earlier
 /// one (`git show -s -p` prints the diff, `git show -p -s` does not -- git 2.53). Taking the
 /// suppressors order-independently swallowed a patch the user had asked for last.
-fn body_is_suppressed<'t, 'a: 't>(tokens: impl Iterator<Item = &'t Token<'a>>) -> bool {
+fn body_is_suppressed(tokens: &[Token<'_>]) -> bool {
+    // `-s`/`--no-patch` and a patch request resolve by last flag wins: `git show -s -p` prints
+    // the diff, `git show -p -s` does not (git 2.53).
     let mut suppressed = false;
     for token in tokens {
-        if suppresses_diff_body(token) {
+        if hard_suppresses_diff_body(token) {
             suppressed = true;
         } else if requests_patch_output(token) {
             suppressed = false;
         }
     }
+    // `--quiet` does not play that game. In `show` it loses to a patch request from either
+    // side -- `--quiet -p` and `-p --quiet` both print the diff -- and only suppresses when
+    // nothing else asked for output. Treating it as a third spelling of `-s` dropped a patch
+    // the user had asked for.
     suppressed
+        || (tokens.iter().any(is_quiet_flag) && !tokens.iter().any(requests_patch_output))
+}
+
+/// `--quiet`, which is `--exit-code`'s companion rather than a shape flag. Only `run_diff`
+/// treats it as one, and there it takes the raw route before any of this is consulted.
+fn is_quiet_flag(token: &Token<'_>) -> bool {
+    (token.kind, token.text) == (TokenKind::Long, "quiet")
+}
+
+/// The suppressors that really do replace the body: `-s` and its long spelling.
+fn hard_suppresses_diff_body(token: &Token<'_>) -> bool {
+    matches!(
+        (token.kind, token.text),
+        (TokenKind::Long, "no-patch") | (TokenKind::Short, "s")
+    )
 }
 
 fn requests_patch_output(token: &Token<'_>) -> bool {
@@ -496,7 +517,7 @@ fn run_show(
     }
     let mut printed = summary_result.stdout.trim().to_string();
 
-    if body_is_suppressed(tokens.iter()) {
+    if body_is_suppressed(&tokens) {
         // `git show -s` is the commit summary and nothing else, so the stat and diff steps
         // below would print what the user explicitly suppressed.
         let shown = never_worse(&raw_output, &printed);
@@ -4765,19 +4786,29 @@ A  added.rs
     fn test_body_suppression_follows_gits_last_flag_wins() {
         // git 2.53: `git show -s -p` prints the diff, `git show -p -s` does not. Taking the
         // suppressors order-independently swallowed a patch the user asked for last.
-        let cases: [(&[&str], bool); 6] = [
+        // `--quiet` is deliberately not in the last-wins group: git show ignores it for shape
+        // whenever a patch is requested, from either side, and honours it only when nothing
+        // else asked for output. Every row measured against git 2.53.
+        let cases: [(&[&str], bool); 13] = [
             (&["-s"], true),
             (&["--no-patch"], true),
+            (&["--quiet"], true),
             (&["-s", "-p"], false),
             (&["-p", "-s"], true),
             (&["--no-patch", "--patch"], false),
             (&["--patch", "--no-patch"], true),
+            (&["--quiet", "-p"], false),
+            (&["-p", "--quiet"], false),
+            (&["--quiet", "-U0"], false),
+            (&["-U0", "--quiet"], false),
+            (&["--quiet", "-s", "-p"], false),
+            (&["-p", "-s", "--quiet"], true),
         ];
         for (args, expected) in cases {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_diff_args(&owned);
             assert_eq!(
-                body_is_suppressed(tokens.iter()),
+                body_is_suppressed(&tokens),
                 expected,
                 "{args:?}"
             );
