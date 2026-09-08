@@ -233,20 +233,34 @@ fn run_show(
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
     // so their source order does not affect which one runs.
     let positionals = show_positionals(args);
-    // Authoritative blob decision: `show_route` flags a `rev:path` *candidate* (cheap,
-    // pure pre-filter), then `git cat-file -t` confirms it is really a blob. A rejected
-    // candidate — a flag value that happens to contain a colon (`-S 'url:1'`, and the
-    // short-flag clusters `-pS`/`-wG`/`-pI`/… whose tail git re-parses), a tree/commit,
-    // or a bogus object — falls back to the commit-diff / --stat classification instead
-    // of being windowed. Asking git subsumes any attempt to mirror its flag grammar.
-    let route = match show_route(args) {
-        ShowRoute::Blob
-            if blob_show_target(args).is_some_and(|c| probe_is_blob(global_args, c)) =>
-        {
-            ShowRoute::Blob
+    // Authoritative blob decision (belt-and-suspenders). `show_route` is the cheap pure
+    // pre-filter: does ANY positional look like `rev:path`? Only then do we probe with
+    // `git cat-file -t` — and we probe EVERY colon positional, not just the first. The
+    // cluster-aware `show_positionals` already drops option-value operands (`-S 'url:1'`,
+    // the `-G` value in `-wG a:b HEAD:blob`, …), but probing all candidates means that
+    // even if the walker ever missed some exotic short-flag cluster, a non-object like
+    // `a:b` is still rejected by `cat-file` and the REAL blob elsewhere on the line is
+    // rescued instead of being silently dropped or misrouted through lossy decoding.
+    //   * exactly one blob  → window it (the byte-safe path below),
+    //   * more than one      → git concatenates the objects with no separator, so the
+    //                          hint can't reconstruct them → raw passthrough,
+    //   * zero               → ordinary commit-diff / --stat classification.
+    // Any presence of a blob object takes the byte-safe path: its output carries raw
+    // blob bytes that the commit-diff path's lossy UTF-8 decode would corrupt (a Latin-1
+    // `0xF1` becomes the `U+FFFD` replacement char — verified).
+    let (route, blob_objects) = match show_route(args) {
+        ShowRoute::Blob => {
+            let blobs: Vec<&String> = blob_candidates(args)
+                .into_iter()
+                .filter(|c| probe_is_blob(global_args, c))
+                .collect();
+            if blobs.is_empty() {
+                (commit_or_stat_route(args), blobs)
+            } else {
+                (ShowRoute::Blob, blobs)
+            }
         }
-        ShowRoute::Blob => commit_or_stat_route(args),
-        other => other,
+        other => (other, Vec::new()),
     };
 
     if route == ShowRoute::StatOrFormat {
@@ -305,10 +319,13 @@ fn run_show(
         // diverge from git's bytes and silently break recovery — and can even inflate
         // the output past what git emitted.
         //
-        // So we window ONLY content that is valid UTF-8 recoverable byte-for-byte;
-        // everything else goes through `emit_raw_bytes_passthrough`, byte-identical to a
-        // plain `git show`. This makes the recovery hint ALWAYS reconstruct exactly, and
-        // scopes windowing to the common text-lockfile case the filter exists for.
+        // So we window ONLY content that is valid UTF-8 recoverable byte-for-byte AND
+        // whose flags/pathspec don't perturb the dump (see the `can_window` gate below:
+        // no `--textconv`/`--filters`/`--ext-diff`, no trailing `-- <pathspec>`, a single
+        // sole blob object); everything else goes through `emit_raw_bytes_passthrough`,
+        // byte-identical to a plain `git show`. This makes the recovery hint reconstruct
+        // exactly whenever we DO window, and scopes windowing to the common text-lockfile
+        // case the filter exists for.
         //
         // Larger blobs window regardless of whether stdout is a pipe or a TTY: the whole
         // point of the filter is to shrink what the agent reads, and the agent reads
@@ -342,20 +359,32 @@ fn run_show(
         // below caps at `max_lines`. `--max-lines` does not apply here — blob output
         // is bounded by bytes, not lines.
         //
-        // `route == Blob` guarantees the first positional is the blob object. Window it
-        // only when it is the sole object: git concatenates multiple objects with no
-        // separator, so cutting the first would silently drop the rest (and the multi-
-        // object concatenation is not the single `rev:path` the hint reconstructs).
-        // Below the budget, `compact_blob_show` returns the text unchanged, so the
-        // single-object print stays byte-identical to git here too.
-        if positionals.len() == 1 {
-            let shown = compact_blob_show(text, positionals[0], global_args);
+        // Window ONLY when git emits exactly this one blob and nothing that makes the
+        // `git show <rev>:<path> | tail` recovery hint diverge from git's bytes:
+        //   * a single positional that is the sole blob object — git concatenates
+        //     multiple objects with no separator, so cutting the first would silently
+        //     drop the rest, and that concatenation is not the single `rev:path` the
+        //     hint reconstructs;
+        //   * no content-transforming flag (`--textconv`/`--filters`/`--ext-diff`
+        //     rewrite the dump, and the hint omits them — see `has_content_transform_flag`);
+        //   * no trailing `-- <pathspec>` (also omitted from the hint — see
+        //     `has_trailing_pathspec`).
+        // Everything else passes the raw bytes through, byte-identical to plain git show.
+        // Below the budget, `compact_blob_show` returns the text unchanged, so a windowed
+        // single-object print stays byte-identical to git there too.
+        let can_window = positionals.len() == 1
+            && blob_objects.len() == 1
+            && !has_content_transform_flag(args)
+            && !has_trailing_pathspec(args);
+        if can_window {
+            let shown = compact_blob_show(text, blob_objects[0], global_args);
             print!("{}", shown);
             // Track savings against the bytes git actually wrote (`result.stdout`).
             timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
             return Ok(0);
         }
-        // Multiple concatenated objects: pass through byte-identical.
+        // Not windowable (multiple concatenated objects, a content-transforming flag, or
+        // a trailing pathspec): pass through byte-identical.
         return emit_raw_bytes_passthrough(
             &result.stdout,
             &label,
@@ -488,11 +517,12 @@ fn is_blob_show_arg(arg: &str) -> bool {
 
 /// The positional (non-option) arguments of a `git show` — its objects. Options and
 /// the value tokens they consume (`-S 'url:1'`, `-L 1,2:file`) are dropped via git's
-/// own flag/value grammar ([`consumes_next_token_as_value`], shared with run_log), so
-/// an option operand that happens to contain a colon is never mistaken for a blob and
-/// truncated. Args after a `--` are pathspecs, never objects, so a colon in a filename
-/// there (`-- weird:name`) is excluded by scanning only the args before the first `--`;
-/// a trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
+/// own flag/value grammar ([`flag_token_consumes_next`]), so an option operand that
+/// happens to contain a colon is never mistaken for a blob and truncated. This handles
+/// short-flag CLUSTERS too (`-wG a:b`, `-pS a:b`), whose value-flag tail git re-parses.
+/// Args after a `--` are pathspecs, never objects, so a colon in a filename there
+/// (`-- weird:name`) is excluded by scanning only the args before the first `--`; a
+/// trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
 /// blob) rather than emptying the list.
 fn show_positionals(args: &[String]) -> Vec<&String> {
     let rev_args = match args.iter().position(|a| a == "--") {
@@ -503,7 +533,7 @@ fn show_positionals(args: &[String]) -> Vec<&String> {
     let mut iter = rev_args.iter();
     while let Some(arg) = iter.next() {
         if arg.starts_with('-') {
-            if consumes_next_token_as_value(arg) {
+            if flag_token_consumes_next(arg) {
                 iter.next(); // skip this flag's value token
             }
             continue;
@@ -513,14 +543,75 @@ fn show_positionals(args: &[String]) -> Vec<&String> {
     positionals
 }
 
-/// git show's object argument, when its first positional is a `<rev>:<path>` blob.
-/// Only the first positional is git show's primary object; a later positional is an
-/// extra object git concatenates, not a windowing target.
-fn blob_show_target(args: &[String]) -> Option<&String> {
+/// Whether a flag token consumes the NEXT arg as its value (so `show_positionals` must
+/// skip it). Handles long flags (`--grep foo`) via [`consumes_next_token_as_value`] and
+/// short-flag CLUSTERS (`-wG foo`, `-pS bar`), which git re-parses char by char.
+///
+/// Inside a cluster, the first value-taking short flag (`-S -G -I -L -O -l -n`) takes
+/// the REST of the cluster as an INLINE value when more chars follow it (`-Sfoo` == `-S
+/// foo`, so it does NOT consume the next arg), or the NEXT arg when it is the cluster's
+/// last char (`-wG` == `-w -G`, consuming the next arg). Any earlier char is a boolean
+/// flag we skip over. This reuses the single flag/value table rather than re-tokenizing
+/// git's whole grammar, so `git show -wG x:y HEAD:big` correctly treats `x:y` as `-G`'s
+/// value and `HEAD:big` as the object.
+//
+// TODO(after #3681): replace this short-cluster walk with the ValueSpec factorization;
+// the per-char logic here is exactly what a ValueSpec table subsumes.
+fn flag_token_consumes_next(arg: &str) -> bool {
+    // A short cluster is a single leading `-` followed by non-empty flag chars (not the
+    // `--long` form and not the bare `-` stdin sentinel). Everything else (`--foo`, `-`)
+    // uses the exact-match table directly.
+    match arg.strip_prefix('-') {
+        Some(cluster) if !cluster.is_empty() && !cluster.starts_with('-') => {
+            for (i, c) in cluster.char_indices() {
+                if is_short_value_flag(c) {
+                    // Consumes the next arg only if no inline value follows in-cluster.
+                    return i + c.len_utf8() == cluster.len();
+                }
+            }
+            false
+        }
+        _ => consumes_next_token_as_value(arg),
+    }
+}
+
+/// Whether a single-letter short flag takes a value (`-S`, `-G`, `-L`, …). Derived from
+/// [`consumes_next_token_as_value`] so the flag/value table stays the single source of
+/// truth and no parallel list can drift out of sync.
+fn is_short_value_flag(c: char) -> bool {
+    c.is_ascii() && consumes_next_token_as_value(format!("-{c}").as_str())
+}
+
+/// The `git show` positionals that look like `<rev>:<path>` blob objects — the
+/// windowing candidates. ALL of them are returned (not just the first) so `run_show`
+/// can `cat-file`-probe every one: a value operand a missed exotic cluster might leave
+/// behind is rejected by the probe, while the real blob elsewhere on the line is found.
+fn blob_candidates(args: &[String]) -> Vec<&String> {
     show_positionals(args)
         .into_iter()
-        .next()
         .filter(|a| is_blob_show_arg(a))
+        .collect()
+}
+
+/// Whether a `git show` invocation carries any content-transforming flag
+/// (`--textconv`/`--filters`/`--ext-diff`) that rewrites a blob's bytes. The `git show
+/// <rev>:<path> | tail` recovery hint omits these flags, so its output would not match
+/// what git printed; their presence forces byte-identical raw passthrough instead of
+/// windowing. The `--no-*` spellings restore the default (no rewrite) and are safe, so
+/// only the enabling spellings count. Flags precede `--`, so scan up to it.
+fn has_content_transform_flag(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|a| *a != "--")
+        .any(|a| matches!(a.as_str(), "--textconv" | "--filters" | "--ext-diff"))
+}
+
+/// Whether a `-- <pathspec>` with at least one path after it is present. Empirically
+/// git ignores a trailing pathspec for a `rev:path` blob dump (verified: output is
+/// byte-identical with and without it), but the recovery hint omits it, so rather than
+/// bank on that holding for every git version and pathspec form we force byte-identical
+/// raw passthrough whenever one accompanies a blob.
+fn has_trailing_pathspec(args: &[String]) -> bool {
+    matches!(args.iter().position(|a| a == "--"), Some(sep) if args.len() > sep + 1)
 }
 
 /// Which `git show` handler an invocation routes to.
@@ -542,12 +633,12 @@ enum ShowRoute {
 /// would send it through lossy UTF-8 decoding and reintroduce the blob corruption the
 /// byte-safe path fixes, so the blob case is checked first.
 ///
-/// This is a cheap, pure PRE-FILTER: a `Blob` result here only means the first
-/// positional *looks like* `rev:path`. The authoritative blob decision is a
-/// `git cat-file -t` probe run by `run_show` (see `probe_is_blob`) on exactly that
-/// candidate — the pre-filter keeps the probe off every other invocation.
+/// This is a cheap, pure PRE-FILTER: a `Blob` result here only means SOME positional
+/// *looks like* `rev:path`. The authoritative blob decision is a `git cat-file -t`
+/// probe run by `run_show` (see `probe_is_blob`) on those candidates — the pre-filter
+/// keeps the probe off every other invocation.
 fn show_route(args: &[String]) -> ShowRoute {
-    if blob_show_target(args).is_some() {
+    if !blob_candidates(args).is_empty() {
         return ShowRoute::Blob;
     }
     commit_or_stat_route(args)
@@ -3800,23 +3891,53 @@ mod tests {
         // (still a blob dump), so it must not disable blob handling.
         let args = show_args(&["HEAD:Cargo.toml", "--", "Cargo.toml"]);
         assert_eq!(show_route(&args), ShowRoute::Blob);
-        assert_eq!(blob_show_target(&args), Some(&"HEAD:Cargo.toml".to_string()));
+        assert_eq!(blob_candidates(&args), vec![&"HEAD:Cargo.toml".to_string()]);
     }
 
     #[test]
-    fn test_blob_show_target_skips_flag_operand_with_colon() {
+    fn test_blob_candidates_skip_flag_operand_with_colon() {
         // Blocking bug #2: `-S 'url:1'`'s operand contains a colon but is the value of
         // a pickaxe flag, not an object — it must not be read as a blob and truncated.
         // The commit is the real (colon-free) object, so this is a commit-diff.
         let args = show_args(&["-S", "url:1", "HEAD"]);
-        assert!(blob_show_target(&args).is_none());
+        assert!(blob_candidates(&args).is_empty());
         assert_eq!(show_route(&args), ShowRoute::CommitDiff);
         // `-L <start,end>:<file>` operand likewise carries a colon.
         let args = show_args(&["-L", "1,2:file.rs", "HEAD"]);
-        assert!(blob_show_target(&args).is_none());
+        assert!(blob_candidates(&args).is_empty());
         // A real blob still routes as a blob even with a preceding value flag.
         let args = show_args(&["-S", "needle", "HEAD:src/main.rs"]);
-        assert_eq!(blob_show_target(&args), Some(&"HEAD:src/main.rs".to_string()));
+        assert_eq!(blob_candidates(&args), vec![&"HEAD:src/main.rs".to_string()]);
+        // A value operand that IS a valid-looking blob (`-S 'HEAD:real'`) is the pickaxe
+        // value, not an object: the walker excludes it, so only the trailing commit
+        // remains and nothing is offered as a windowing candidate.
+        let args = show_args(&["-S", "HEAD:real", "HEAD"]);
+        assert!(blob_candidates(&args).is_empty());
+    }
+
+    #[test]
+    fn test_blob_candidates_short_flag_clusters() {
+        // BLOCKER: a short-flag cluster whose value-taking tail consumes the NEXT token
+        // (`-wG x:y` == `-w -G x:y`) must skip `x:y` and expose the real blob object, not
+        // mistake `x:y` for the blob. Covers the clusters git re-parses.
+        for cluster in ["-wG", "-pS", "-pI", "-pwG", "-wpG"] {
+            let args = show_args(&[cluster, "x:y", "HEAD:big.txt"]);
+            assert_eq!(
+                blob_candidates(&args),
+                vec![&"HEAD:big.txt".to_string()],
+                "cluster {cluster}: x:y is the value flag's operand, HEAD:big.txt the object",
+            );
+        }
+        // An INLINE cluster value (`-Sfoo` == `-S foo`) does NOT consume the next token,
+        // so the following object is still exposed.
+        let args = show_args(&["-Sneedle", "HEAD:big.txt"]);
+        assert_eq!(blob_candidates(&args), vec![&"HEAD:big.txt".to_string()]);
+        // `-Gx:y` (value flag NOT last, inline value `x:y`) consumes no next token.
+        let args = show_args(&["-Gx:y", "HEAD:big.txt"]);
+        assert_eq!(blob_candidates(&args), vec![&"HEAD:big.txt".to_string()]);
+        // A boolean-only cluster (`-wp`) consumes nothing: the object stays a candidate.
+        let args = show_args(&["-wp", "HEAD:big.txt"]);
+        assert_eq!(blob_candidates(&args), vec![&"HEAD:big.txt".to_string()]);
     }
 
     #[test]
@@ -3828,7 +3949,7 @@ mod tests {
         // renders a commit-diff, not a blob dump).
         let args = show_args(&["HEAD", "--", "weird:name.txt"]);
         assert_eq!(show_route(&args), ShowRoute::CommitDiff);
-        assert!(blob_show_target(&args).is_none());
+        assert!(blob_candidates(&args).is_empty());
     }
 
     #[test]
