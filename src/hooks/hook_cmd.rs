@@ -260,6 +260,7 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
