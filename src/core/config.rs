@@ -412,7 +412,7 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
         if let Some(d) = mapping.tee_directory {
             doc["retriever"]["tee_directory"] = toml_edit::value(d.to_string_lossy().as_ref());
         }
-        if mapping.tee_on_success == Some(true) {
+        if mapping.tee_on_success == Some(true) && mode == RecoveryMode::Tee {
             doc["retriever"]["tee_on_success"] = toml_edit::value(true);
         }
     }

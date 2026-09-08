@@ -35,9 +35,6 @@ fn tee_and_hint_with(
     command_slug: &str,
     exit_code: i32,
 ) -> Option<String> {
-    if raw.len() < MIN_FAILURE_BYTES {
-        return None;
-    }
     match mode {
         RecoveryMode::Disabled => None,
         // Legacy tee semantics, unchanged: `failures` writes on failure only,
@@ -62,6 +59,9 @@ fn tee_and_hint_with(
 }
 
 pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
+    if raw.len() < MIN_FAILURE_BYTES {
+        return None;
+    }
     let (mode, cfg) = active()?;
     tee_and_hint_with(mode, &cfg, raw, command_slug, exit_code)
 }

@@ -364,10 +364,11 @@ pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
     if cfg.mode == RecoveryMode::Disabled {
         return;
     }
-    let _ = with_open(cfg, |conn| {
-        bump_stat(conn, slug, "tee", "elisions");
-        Ok(())
-    });
+    // Never create the store from the tee path: choosing tee must leave no
+    // sqlite artifact behind. Stats are recorded only into an existing store.
+    if let Ok(Some(conn)) = open_existing(cfg) {
+        bump_stat(&conn, slug, "tee", "elisions");
+    }
 }
 
 fn mark_recalled(conn: &Connection, hash: &str, command: &str) {
@@ -409,10 +410,9 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str) {
     if recovery_disabled_by_env() || cfg.mode == RecoveryMode::Disabled {
         return;
     }
-    let _ = with_open(cfg, |conn| {
-        record_tee_recall_on(conn, slug, path);
-        Ok(())
-    });
+    if let Ok(Some(conn)) = open_existing(cfg) {
+        record_tee_recall_on(&conn, slug, path);
+    }
 }
 
 pub fn record_tee_recall(slug: &str, path: &str) {
