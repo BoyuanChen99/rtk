@@ -221,8 +221,17 @@ fn dash_l_and_dash_cap_l_match_grep() {
     let f1 = write(d.path(), "hit1.txt", "alpha\ntenant_id here\n");
     let f2 = write(d.path(), "miss.txt", "nothing to see\n");
     let f3 = write(d.path(), "hit2.txt", "tenant_id again\n");
+    let f4 = write(d.path(), "port.txt", "listen on 8080\n");
 
     assert_eq_grep(&["-l", "tenant_id", &f1, &f2, &f3]); // -l leading (the token that broke)
     assert_eq_grep(&["tenant_id", &f1, &f2, &f3, "-l"]); // -l trailing
     assert_eq_grep(&["-L", "tenant_id", &f1, &f2, &f3]); // -L files-without-match
+
+    // A numeric pattern is the only form that failed silently: bound to `usize`,
+    // `-l` swallowed it as max_len and read the first path as the pattern, so rtk
+    // printed nothing and exited 1 while grep listed the file. A non-numeric
+    // pattern stops at clap's parse error and falls back to raw grep, which is
+    // byte-identical here and so invisible to the assertions above.
+    assert_eq_grep(&["-l", "8080", &f4, &f2]);
+    assert_eq_grep(&["-L", "8080", &f4, &f2]);
 }
