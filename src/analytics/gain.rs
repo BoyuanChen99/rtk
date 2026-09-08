@@ -29,7 +29,7 @@ pub fn run(
     yes: bool,
     _verbose: u8,
 ) -> Result<()> {
-    if recalls {
+    if recalls && !reset {
         return show_recall_stats();
     }
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
@@ -43,7 +43,11 @@ pub fn run(
         tracker
             .reset_all()
             .context("Failed to reset token savings")?;
-        println!("{}", styled("Token savings stats reset to zero.", true));
+        crate::core::retriever::reset_stats().context("Failed to reset recall stats")?;
+        println!(
+            "{}",
+            styled("Token savings and recall stats reset to zero.", true)
+        );
         return Ok(());
     }
 
@@ -431,6 +435,22 @@ fn print_efficiency_meter(pct: f64) {
     }
 }
 
+const VERDICT_MIN_ELISIONS: i64 = 5;
+const VERDICT_WIDTH: usize = 14;
+const ISSUES_URL: &str = "https://github.com/rtk-ai/rtk/issues";
+
+/// Bands match `colorize_recall_rate` so the colour and the wording never disagree.
+fn recall_verdict(elisions: i64, recalls: i64) -> &'static str {
+    if elisions < VERDICT_MIN_ELISIONS {
+        return "-";
+    }
+    match recalls * 100 / elisions {
+        p if p >= 30 => "too aggressive",
+        p if p >= 10 => "watch",
+        _ => "ok",
+    }
+}
+
 fn colorize_recall_rate(pct: i64, padded: &str) -> String {
     if !std::io::stdout().is_terminal() {
         return padded.to_string();
@@ -475,7 +495,7 @@ fn show_recall_stats() -> Result<()> {
         .max()
         .unwrap_or(6)
         .clamp(6, 24);
-    let table_width = slug_width + 2 + 8 + 2 + 8 + 2 + 6;
+    let table_width = slug_width + 2 + 8 + 2 + 8 + 2 + 6 + 2 + VERDICT_WIDTH;
 
     let render = |title: &str, mode_key: &str, prefix: &str| {
         let rows: Vec<_> = stats.iter().filter(|s| s.mode == mode_key).collect();
@@ -485,7 +505,7 @@ fn show_recall_stats() -> Result<()> {
         println!("{}", styled(title, true));
         println!("{}", "─".repeat(table_width));
         println!(
-            "{:<slug_width$}  {:>8}  {:>8}  {:>6}",
+            "{:<slug_width$}  {:>8}  {:>8}  {:>6}  Verdict",
             "Filter", "Elisions", "Recalled", "Rate"
         );
         println!("{}", "─".repeat(table_width));
@@ -497,11 +517,12 @@ fn show_recall_stats() -> Result<()> {
                 (0, "-".to_string())
             };
             println!(
-                "{}  {:>8}  {:>8}  {}",
+                "{}  {:>8}  {:>8}  {}  {}",
                 truncate_for_column(&s.slug, slug_width),
                 s.elisions,
                 s.recalls,
-                colorize_recall_rate(pct, &format!("{rate:>6}"))
+                colorize_recall_rate(pct, &format!("{rate:>6}")),
+                colorize_recall_rate(pct, recall_verdict(s.elisions, s.recalls))
             );
         }
         println!();
@@ -510,8 +531,14 @@ fn show_recall_stats() -> Result<()> {
     render("Sqlite (exact — reads go through rtk recall)", "sqlite", "");
     render("Tee (approximate — bash-observed reads only)", "tee", "≥");
 
-    println!("A high rate means the filter hides output the agent goes back for:");
-    println!("consider raising that filter's cap.");
+    println!("\"too aggressive\" means the filter hides output the agent comes back for.");
+    println!("Each recall costs an extra API turn plus the full output, so it cancels");
+    println!("the savings on that command instead of adding to them.");
+    println!(
+        "\"-\" means fewer than {VERDICT_MIN_ELISIONS} elisions so far: not enough data to judge."
+    );
+    println!();
+    println!("Raise that filter's cap, or report it: {ISSUES_URL}");
     Ok(())
 }
 
@@ -839,7 +866,7 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 fn confirm_reset() -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal, Write};
 
-    eprint!("This will permanently delete all tracking data. Continue? [y/N] ");
+    eprint!("This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] ");
     io::stderr().flush().ok();
 
     if !io::stdin().is_terminal() {
@@ -855,4 +882,32 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recall_verdict_needs_a_sample_before_judging() {
+        assert_eq!(recall_verdict(4, 4), "-");
+        assert_eq!(recall_verdict(0, 0), "-");
+        assert_eq!(recall_verdict(5, 5), "too aggressive");
+    }
+
+    #[test]
+    fn test_recall_verdict_bands_match_the_colour_bands() {
+        assert_eq!(recall_verdict(100, 29), "watch");
+        assert_eq!(recall_verdict(100, 30), "too aggressive");
+        assert_eq!(recall_verdict(100, 9), "ok");
+        assert_eq!(recall_verdict(100, 10), "watch");
+        assert_eq!(recall_verdict(100, 0), "ok");
+    }
+
+    #[test]
+    fn test_recall_verdict_fits_its_column() {
+        for v in ["-", "ok", "watch", "too aggressive"] {
+            assert!(v.len() <= VERDICT_WIDTH, "{v} overflows the column");
+        }
+    }
 }

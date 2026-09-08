@@ -360,6 +360,26 @@ pub fn stats_snapshot() -> Result<Vec<RecallStat>> {
     stats_snapshot_with(&cfg)
 }
 
+pub fn reset_stats() -> Result<()> {
+    let cfg = Config::load().unwrap_or_default().retriever;
+    reset_stats_with(&cfg)
+}
+
+fn reset_stats_with(cfg: &RetrieverConfig) -> Result<()> {
+    let Some(conn) = open_existing(cfg)? else {
+        return Ok(());
+    };
+    conn.execute_batch(
+        "BEGIN;
+         DELETE FROM recall_stats;
+         DELETE FROM tee_reads;
+         UPDATE recall SET recalled = 0;
+         COMMIT;",
+    )
+    .context("reset recall stats")?;
+    Ok(())
+}
+
 pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
     if cfg.mode == RecoveryMode::Disabled {
         return;
@@ -753,6 +773,54 @@ mod tests {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
         }
+    }
+
+    #[test]
+    fn test_reset_stats_clears_counters_and_lets_reads_count_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"a\nb\nc\n", "vitest", Some(1), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        mark_recalled(&conn, &stored.hash, "vitest");
+        record_tee_recall_on(&conn, "vitest", "/tmp/vitest.log");
+        assert!(!stats_snapshot_with(&cfg).unwrap().is_empty());
+
+        drop(conn);
+        reset_stats_with(&cfg).unwrap();
+        assert!(
+            stats_snapshot_with(&cfg).unwrap().is_empty(),
+            "reset must zero every counter"
+        );
+
+        let conn = open(&cfg).unwrap();
+        mark_recalled(&conn, &stored.hash, "vitest");
+        let stats = stats_snapshot_with(&cfg).unwrap();
+        let s = stats
+            .iter()
+            .find(|s| s.slug == "vitest" && s.mode == "sqlite")
+            .expect("a read after the reset counts again");
+        assert_eq!(s.recalls, 1);
+    }
+
+    #[test]
+    fn test_reset_stats_keeps_the_stored_output_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"a\nb\nc\n", "vitest", Some(1), 1).unwrap();
+        reset_stats_with(&cfg).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert!(
+            load_by_hash(&conn, &stored.hash).unwrap().is_some(),
+            "reset clears counters, never the recoverable output"
+        );
+    }
+
+    #[test]
+    fn test_reset_stats_never_creates_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        reset_stats_with(&cfg).unwrap();
+        assert!(!cfg.database_path.as_ref().unwrap().exists());
     }
 
     #[test]

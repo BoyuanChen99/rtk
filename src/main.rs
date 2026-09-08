@@ -474,7 +474,7 @@ enum Commands {
         /// Show recall efficiency per filter (elisions vs agent recalls)
         #[arg(long)]
         recalls: bool,
-        /// Reset all token savings stats to zero
+        /// Reset token savings and recall stats to zero
         #[arg(long)]
         reset: bool,
         /// Skip confirmation prompt when resetting
