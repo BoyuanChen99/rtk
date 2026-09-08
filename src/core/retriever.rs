@@ -656,17 +656,16 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         return list_entries(&conn);
     }
 
-    let row = match args.hash {
-        Some(h) => match load_by_hash(&conn, h) {
-            Ok(row) => row,
-            Err(e) => {
-                eprintln!("rtk recall: {e}");
-                return Ok(1);
-            }
-        },
-        None => {
-            eprintln!("rtk recall: provide a <hash> (from a recovery hint) or --list");
-            return Ok(2);
+    // `args.list` returned above and the usage guard rejected a missing hash,
+    // so a hash is present here.
+    let Some(hash) = args.hash.as_ref() else {
+        return Ok(2);
+    };
+    let row = match load_by_hash(&conn, hash) {
+        Ok(row) => row,
+        Err(e) => {
+            eprintln!("rtk recall: {e}");
+            return Ok(1);
         }
     };
 
