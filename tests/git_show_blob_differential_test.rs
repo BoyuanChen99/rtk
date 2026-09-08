@@ -11,9 +11,12 @@
 //! and checks rtk's CLASSIFICATION (did it window? pass through? render a commit-diff?)
 //! against ground truth from `git cat-file -t`. It asserts:
 //! - 0 misroutes: rtk never windows anything git does not call a `blob`;
-//! - 0 silent losses: a large, byte-recoverable UTF-8 blob is ALWAYS windowed;
-//! - byte fidelity: a blob rtk declines to window (Latin-1 / UTF-16 / small text) is
-//!   emitted byte-identically to plain `git show`.
+//! - 0 silent losses: a large, byte-recoverable UTF-8 blob is ALWAYS windowed — INCLUDING
+//!   when a colon-carrying short-flag CLUSTER (`-wG x:y`, `-pS url:1`, …) precedes it, the
+//!   exact cross the old fuzzer never generated so the blocker hid for three rounds;
+//! - byte fidelity: a blob rtk declines to window (Latin-1 / UTF-16 / small text, a
+//!   Latin-1 blob behind a cluster flag, or a blob with `--textconv` / a trailing
+//!   `-- <path>`) is emitted byte-identically to `git show` — no U+FFFD mojibake.
 //!
 //! It shells out to the real `git` and the built `rtk` binary, matching the repo's other
 //! integration tests (e.g. `diff_byte_accuracy_test.rs`).
@@ -203,6 +206,23 @@ enum Kind {
     CommitMisroute,
     /// A bogus `rev:path` (nonexistent object) → git errors, never windowed.
     Bogus,
+    /// THE BLOCKER: a colon-carrying short-flag CLUSTER (`-wG x:y`, `-pS url:1`, …)
+    /// placed BEFORE a large UTF-8 blob. git consumes the colon token as the flag's
+    /// value and dumps ONLY the blob, so it MUST still window (0 silent loss). The old
+    /// walker knew only single-letter flags, so it read the colon value as the object,
+    /// the probe rejected it, and the real blob fell through un-windowed.
+    ClusterLargeUtf8,
+    /// The same cluster before a Latin-1 blob. The old misroute sent it through the
+    /// commit-diff path's lossy UTF-8 decode → `0xF1` became U+FFFD mojibake. Must pass
+    /// through BYTE-IDENTICALLY to git.
+    ClusterLatin1,
+    /// A content-transforming flag (`--textconv`) before a large blob (MINOR 1). The
+    /// `git show rev:path | tail` recovery hint omits the flag, so rtk must NOT window;
+    /// it passes the bytes through byte-identically to `git show <same args>`.
+    TextconvLargeUtf8,
+    /// A trailing `-- <pathspec>` beside a large blob (MINOR 2). Also omitted from the
+    /// hint, so rtk must NOT window; byte-identical passthrough.
+    PathspecLargeUtf8,
 }
 
 fn kind_object(kind: Kind) -> &'static str {
@@ -214,6 +234,10 @@ fn kind_object(kind: Kind) -> &'static str {
         Kind::Tree => "HEAD:dir",
         Kind::CommitMisroute => "HEAD",
         Kind::Bogus => "HEAD:does-not-exist.txt",
+        Kind::ClusterLargeUtf8 | Kind::TextconvLargeUtf8 | Kind::PathspecLargeUtf8 => {
+            "HEAD:large.txt"
+        }
+        Kind::ClusterLatin1 => "HEAD:latin1.pck",
     }
 }
 
@@ -245,6 +269,24 @@ const COLON_VALUE_FLAGS: &[(&str, &str)] = &[
     ("--ignore-matching-lines", "a:b"),
 ];
 
+// The subset of `COLON_VALUE_FLAGS` the cluster-aware walker resolves WITHOUT needing a
+// long-flag table entry: short single-letter value flags and their clusters. For these,
+// the walker skips the colon value and the following blob is the sole positional, so a
+// large UTF-8 blob after one of them MUST window. (`--ignore-matching-lines` is a long
+// flag absent from the value table, so its space-form value stays a phantom positional
+// and the blob passes through byte-identically instead — correct, just uncompacted; it
+// is exercised via `CommitMisroute` and the byte-fidelity cross below, not here.)
+const WINDOWING_CLUSTER_FLAGS: &[(&str, &str)] = &[
+    ("-pS", "url:1"),
+    ("-wG", "x:y"),
+    ("-pI", "a:b"),
+    ("-pwG", "q:r"),
+    ("-wpG", "m:n"),
+    ("-S", "needle:1"),
+    ("-G", "pat:2"),
+    ("-I", "re:3"),
+];
+
 fn build_invocation(rng: &mut Rng, kind: Kind) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     match kind {
@@ -267,8 +309,28 @@ fn build_invocation(rng: &mut Rng, kind: Kind) -> Vec<String> {
                 args.push(rng.pick(BLOB_SAFE_FLAGS).to_string());
             }
         }
+        Kind::ClusterLargeUtf8 | Kind::ClusterLatin1 => {
+            // A colon-carrying short-flag cluster the walker skips, then the blob.
+            // Optionally sprinkle blob-safe flags around it — they must not change the
+            // outcome. This is the exact cross that was NEVER generated before (the old
+            // fuzzer only paired these clusters with a blob-less HEAD), so the blocker hid.
+            if rng.chance(1, 2) {
+                args.push(rng.pick(BLOB_SAFE_FLAGS).to_string());
+            }
+            let (flag, val) = *rng.pick(WINDOWING_CLUSTER_FLAGS);
+            args.push(flag.to_string());
+            args.push(val.to_string());
+        }
+        Kind::TextconvLargeUtf8 => {
+            args.push("--textconv".to_string());
+        }
+        Kind::PathspecLargeUtf8 => {} // trailing `-- <path>` appended after the object
     }
     args.push(kind_object(kind).to_string());
+    if let Kind::PathspecLargeUtf8 = kind {
+        args.push("--".to_string());
+        args.push("large.txt".to_string());
+    }
     args
 }
 
@@ -297,6 +359,10 @@ fn git_show_blob_classification_differential() {
         Kind::Tree,
         Kind::CommitMisroute,
         Kind::Bogus,
+        Kind::ClusterLargeUtf8,
+        Kind::ClusterLatin1,
+        Kind::TextconvLargeUtf8,
+        Kind::PathspecLargeUtf8,
     ];
 
     let mut rng = Rng(SEED);
@@ -357,6 +423,58 @@ fn git_show_blob_classification_differential() {
             // Trees, commit-misroutes and bogus objects must never window.
             Kind::Tree | Kind::CommitMisroute | Kind::Bogus => {
                 assert!(!windowed, "non-blob must not window: {args:?}");
+            }
+            // BLOCKER: a colon-cluster before a large UTF-8 blob must STILL window — git
+            // dumps only the blob, so failing to window is a silent savings loss. (Old
+            // code misrouted this to the commit-diff path: not windowed → this fails.)
+            Kind::ClusterLargeUtf8 => {
+                if !windowed {
+                    silent_losses.push(format!(
+                        "cluster + large UTF-8 blob not windowed for `git show {}`",
+                        args.join(" ")
+                    ));
+                } else {
+                    assert!(out.status.success(), "windowed blob show should exit 0");
+                }
+            }
+            // BLOCKER: a colon-cluster before a Latin-1 blob must pass through
+            // byte-identically to git — the old misroute lossily decoded it to U+FFFD
+            // mojibake (not byte-identical → this fails on old code).
+            Kind::ClusterLatin1 => {
+                assert!(!windowed, "latin-1 blob must never window: {args:?}");
+                // Compare against git run with the SAME args, not just `git show object`:
+                // the strongest invariant is "rtk == git for this exact command".
+                let mut full: Vec<&str> = vec!["show"];
+                full.extend(arg_refs.iter().copied());
+                let plain = git(path, home, &full);
+                if out.stdout != plain.stdout {
+                    fidelity_breaks.push(format!(
+                        "cluster + latin1 `git show {}` differs from git (rtk {} vs git {} bytes)",
+                        args.join(" "),
+                        out.stdout.len(),
+                        plain.stdout.len()
+                    ));
+                }
+            }
+            // MINOR 1/2: a content-transforming flag or a trailing pathspec makes the
+            // recovery hint diverge from git's bytes, so rtk must NOT window; it passes
+            // through byte-identically to git run with the SAME args.
+            Kind::TextconvLargeUtf8 | Kind::PathspecLargeUtf8 => {
+                assert!(
+                    !windowed,
+                    "transform-flag / trailing-pathspec must not window: {args:?}"
+                );
+                let mut full: Vec<&str> = vec!["show"];
+                full.extend(arg_refs.iter().copied());
+                let plain = git(path, home, &full);
+                if out.stdout != plain.stdout {
+                    fidelity_breaks.push(format!(
+                        "`git show {}` differs from git (rtk {} vs git {} bytes)",
+                        args.join(" "),
+                        out.stdout.len(),
+                        plain.stdout.len()
+                    ));
+                }
             }
         }
     }
@@ -421,6 +539,54 @@ fn windowed_blob_recovery_is_byte_exact() {
     let reconstructed = format!("{head}{tail}");
     assert_eq!(
         reconstructed, full,
+        "head + `tail -n +{n}` must reconstruct the blob byte-for-byte"
+    );
+}
+
+/// The BLOCKER, end-to-end: `-wG x:y HEAD:large.txt` (a colon-cluster whose value the
+/// walker skips) must window the real blob, and its hint — which names only the blob
+/// arg, not the cluster flags — must still reconstruct the blob byte-for-byte.
+#[test]
+fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
+    let repo = setup_repo();
+    let (path, home) = (repo.path.as_path(), repo.home.as_path());
+
+    let out = rtk_show(path, home, &["-wG", "x:y", "HEAD:large.txt"]);
+    assert!(out.status.success());
+    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
+    assert!(
+        shown.contains("[see remaining: git "),
+        "cluster + blob must still window (blocker regression)"
+    );
+    // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the
+    // `x:y` pickaxe value that the old walker mistook for the object.
+    assert!(
+        shown.contains("'HEAD:large.txt'"),
+        "hint must target the real blob arg, not the flag value"
+    );
+
+    let head = &shown[..shown.find("... (+").expect("truncation marker")];
+    let n: usize = {
+        let after = shown.split("| tail -n +").nth(1).expect("tail hint");
+        after
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .expect("N parses")
+    };
+    // git dumps ONLY the blob for this invocation (the colon token is `-G`'s value), so
+    // the recovery target is a plain `git show HEAD:large.txt`.
+    let full = String::from_utf8(git(path, home, &["show", "HEAD:large.txt"]).stdout)
+        .expect("blob is UTF-8");
+    assert!(
+        full.starts_with(head),
+        "shown head is not a byte-exact prefix of git's bytes"
+    );
+    let tail: String = full.lines().skip(n - 1).map(|l| format!("{l}\n")).collect();
+    assert_eq!(
+        format!("{head}{tail}"),
+        full,
         "head + `tail -n +{n}` must reconstruct the blob byte-for-byte"
     );
 }
