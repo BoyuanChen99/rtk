@@ -47,6 +47,7 @@ compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
 tee_max_files = 20          # tee mode: rotation
 tee_max_file_size = 1048576 # tee mode: per-file cap
+tee_on_success = false      # tee mode: legacy `mode = "always"`, archive successful runs too
 # tee_directory = "/custom/tee/dir"
 
 [telemetry]
@@ -128,6 +129,9 @@ To see how often your assistant actually goes back for elided output — and whi
 | `retriever.max_entries` | `200` | FIFO cap on retained entries (0 = no cap) |
 | `retriever.retention_days` | `30` | Age eviction in days (0 = off) |
 | `retriever.compression` | `true` | gzip stored blobs (lossless) |
+| `retriever.tee_max_files` | `20` | tee mode: how many files are kept before rotation |
+| `retriever.tee_max_file_size` | `1048576` | tee mode: per-file cap (1 MiB) |
+| `retriever.tee_on_success` | `false` | tee mode: also archive successful runs — the legacy `[tee] mode = "always"` |
 | Max file size | 1 MB | Truncated above this |
 
 ## Excluding commands from auto-rewrite
