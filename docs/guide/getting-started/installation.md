@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install RTK via curl, Homebrew, Cargo, or from source, and verify the correct version
+description: Install RTK via curl, Homebrew, winget, Cargo, or from source, and verify the correct version
 sidebar:
   order: 1
 ---
