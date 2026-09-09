@@ -374,6 +374,10 @@ jobs:
     needs: [release]
     if: ${{ !inputs.prerelease }}
     runs-on: ubuntu-latest
+    # A failed submission must not fail the release workflow: cd.yml gates
+    # update-latest-tag on build-release, so a red job here would leave the
+    # 'latest' tag on the previous version.
+    continue-on-error: true
     steps:
       - name: Get version
         id: version
@@ -389,7 +393,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - uses: vedantmgoyal9/winget-releaser@v2
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
           identifier: rtk-ai.rtk
           version: ${{ steps.version.outputs.version }}
