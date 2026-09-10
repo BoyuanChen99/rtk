@@ -317,6 +317,13 @@ mod signal_relay {
         }
     }
 
+    pub fn relayed() -> Option<libc::c_int> {
+        match RELAYED.load(Ordering::SeqCst) {
+            0 => None,
+            sig => Some(sig),
+        }
+    }
+
     pub struct Relay;
 
     impl Relay {
@@ -374,6 +381,23 @@ mod signal_relay {
         }
     }
 }
+
+// #2375
+#[cfg(unix)]
+pub fn die_by_relayed_signal() {
+    let Some(sig) = signal_relay::relayed() else {
+        return;
+    };
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn die_by_relayed_signal() {}
 
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
