@@ -275,9 +275,9 @@ mod signal_relay {
     use std::thread;
     use std::time::Duration;
 
-    const POLL: Duration = Duration::from_millis(50);
-    const KILL_GRACE: Duration = Duration::from_millis(1500);
-    const EXIT_GRACE: Duration = Duration::from_millis(1500);
+    const POLL: Duration = Duration::from_millis(25);
+    const KILL_GRACE: Duration = Duration::from_millis(750);
+    const EXIT_GRACE: Duration = Duration::from_millis(750);
 
     static CHILD_PID: AtomicU32 = AtomicU32::new(0);
     static RELAYED: AtomicI32 = AtomicI32::new(0);
@@ -327,8 +327,12 @@ mod signal_relay {
             #[allow(unsafe_code)]
             // nosemgrep: unsafe-block
             unsafe {
-                libc::signal(libc::SIGINT, relay as *const () as libc::sighandler_t);
-                libc::signal(libc::SIGTERM, relay as *const () as libc::sighandler_t);
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    let previous = libc::signal(sig, relay as *const () as libc::sighandler_t);
+                    if previous == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
             }
             thread::spawn(move || {
                 while !FINISHED.load(Ordering::SeqCst) {
@@ -350,8 +354,11 @@ mod signal_relay {
             #[allow(unsafe_code)]
             // nosemgrep: unsafe-block
             unsafe {
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    if libc::signal(sig, libc::SIG_DFL) == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
             }
         }
     }
