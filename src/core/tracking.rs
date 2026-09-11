@@ -1330,6 +1330,12 @@ impl Tracker {
     }
 
     /// Average savings percentage per command (unweighted — each command name counts once).
+    ///
+    /// Keeps the honest signed value: a command whose filter consistently emits
+    /// more than it saves yields a negative average, mirroring `overall_savings_pct`
+    /// and the signed per-command `savings_pct` (see `record`). Only the upper end is
+    /// bounded (a real saving never exceeds 100%); telemetry consumers assert on that,
+    /// not on a `0..=100` floor.
     pub fn avg_savings_per_command(&self) -> Result<f64> {
         let avg: f64 = self.conn.query_row(
             "SELECT COALESCE(AVG(avg_sav), 0.0) FROM (
@@ -1973,6 +1979,31 @@ mod tests {
             summary.total_saved, 0,
             "unsigned aggregate clamps a negative saving to 0 (never wraps)"
         );
+    }
+
+    // avg_savings_per_command keeps the honest signed value: a command whose filter
+    // consistently emits more than it saves yields a negative average (mirroring
+    // overall_savings_pct), never saturated to a fake 0. This is the aggregate that
+    // feeds the telemetry payload, so this pins that telemetry can carry a negative
+    // savings signal instead of hiding a regressing filter behind 0%.
+    #[test]
+    fn test_avg_savings_per_command_reflects_negative() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // 100 tokens in, 150 out: the filter made things worse => -50% per-command.
+        tracker
+            .record("cmd", "rtk worse", 100, 150, 5)
+            .expect("Failed to record worsening command");
+
+        // Single command group, AVG(savings_pct) == -50%: the aggregate stays negative.
+        let avg = tracker
+            .avg_savings_per_command()
+            .expect("avg_savings_per_command");
+        assert!(
+            (avg - (-50.0)).abs() < 1e-9,
+            "expected honest -50% aggregate, got {avg}"
+        );
+        // Upper bound still holds (a real saving never exceeds 100%).
+        assert!(avg <= 100.0, "aggregate must never exceed 100, got {avg}");
     }
 
     // 5. TimedExecution::track records with exec_time > 0

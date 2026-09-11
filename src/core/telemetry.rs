@@ -572,7 +572,12 @@ mod tests {
         assert!(saved_24h >= 0);
         assert!(saved_total >= 0);
         if let Some(p) = pct {
-            assert!((0.0..=100.0).contains(&p));
+            // Signed savings: a net-regressing DB makes overall savings honestly
+            // negative; only the upper bound is a real invariant (never saves > 100%).
+            assert!(
+                p <= 100.0,
+                "overall savings pct must never exceed 100, got {p}"
+            );
         }
     }
 
@@ -586,7 +591,13 @@ mod tests {
         assert!(stats.passthrough_top.len() <= 5);
         assert!(stats.parse_failures_24h >= 0);
         assert!(stats.low_savings_commands.len() <= 5);
-        assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
+        // Signed savings: avg_savings_per_command can be negative for a regressing
+        // filter; bound only the upper end (a real saving never exceeds 100%).
+        assert!(
+            stats.avg_savings_per_command <= 100.0,
+            "avg savings per command must never exceed 100, got {}",
+            stats.avg_savings_per_command
+        );
         assert!(
             ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
                 .iter()
