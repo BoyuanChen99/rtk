@@ -574,7 +574,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test(?:\s|$|[;|&()<>])",
+        pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test(?:[\s:]|$|[;|&()<>])",
         rtk_cmd: "rtk rake",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &[
