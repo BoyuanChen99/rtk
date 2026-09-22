@@ -32,6 +32,11 @@ static MARKED_PROSE_RE: LazyLock<Regex> =
 
 const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
 
+/// POSIX diff's "trouble" exit code: an operand could not be read at all
+/// (missing, permission denied, is-a-directory). Distinct from 1, which says
+/// the two files differ — the distinction a caller's `if diff a b` relies on.
+const DIFF_EXIT_TROUBLE: i32 = 2;
+
 /// Ultra-condensed diff - only changed lines, no context.
 /// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
 /// 2 if an operand cannot be read.
@@ -56,7 +61,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
             let message = format!("rtk diff: {}: {}", path.display(), error);
             eprintln!("{}", message);
             timer.track(&command, "rtk diff", &message, &message);
-            return Ok(2);
+            return Ok(DIFF_EXIT_TROUBLE);
         }
     };
 
