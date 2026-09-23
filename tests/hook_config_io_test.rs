@@ -7,6 +7,9 @@ use tempfile::TempDir;
 #[test]
 fn copilot_cli_rewrite_preserves_vscode_tool_input() {
     let temp = TempDir::new().unwrap();
+    // Stop the project-root walk inside the temp dir so permission rules from an
+    // ancestor `.claude/settings.json` on the test machine cannot decide the outcome.
+    fs::create_dir(temp.path().join(".claude")).unwrap();
     let input = serde_json::json!({
         "tool_name": "run_in_terminal",
         "tool_input": {"command": "git status", "timeout": 5000, "description": "Inspect changes"}

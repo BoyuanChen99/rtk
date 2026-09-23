@@ -1340,7 +1340,7 @@ fn is_command_hook(hook: &serde_json::Value, matches: impl Fn(&str) -> bool) -> 
 /// Codex/Cursor match tool names with regular expressions.
 fn group_covers_tool(group: &serde_json::Value, tool: &str) -> bool {
     match group.get("matcher") {
-        None => true,
+        None | Some(serde_json::Value::Null) => true,
         Some(matcher) => matcher.as_str().is_some_and(|pattern| {
             pattern.is_empty()
                 || pattern == "*"
@@ -9945,7 +9945,12 @@ mod tests {
                 "{matcher:?}"
             );
         }
-        for (matcher, expected) in [("Read, Bash", true), ("Ba", false), ("[", false)] {
+        for (matcher, expected) in [
+            (serde_json::Value::Null, true),
+            (serde_json::json!("Read, Bash"), true),
+            (serde_json::json!("Ba"), false),
+            (serde_json::json!("["), false),
+        ] {
             let root = serde_json::json!({"hooks": {"PreToolUse": [
                 {"matcher": matcher, "hooks": [{"command": CLAUDE_HOOK_COMMAND}]}
             ]}});
