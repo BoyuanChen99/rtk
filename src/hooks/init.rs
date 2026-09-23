@@ -11642,6 +11642,31 @@ mod tests {
         });
     }
 
+    /// `--opencode` is installed after RTK.md. A missing Claude dir must not
+    /// abort before that install. Unix only: OpenCode resolves through
+    /// `dirs::home_dir()`, which follows `$HOME` on Unix and ignores it on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn test_global_opencode_installs_when_claude_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, true, InitContext::default()).unwrap();
+
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            let plugin = tmp
+                .path()
+                .join("home")
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(OPENCODE_PLUGIN_FILE);
+            assert!(
+                plugin.exists(),
+                "OpenCode plugin must be installed when ~/.claude was missing"
+            );
+        });
+    }
+
     #[test]
     fn test_patch_settings_json_tolerates_utf8_bom() {
         let tmp = TempDir::new().unwrap();
