@@ -622,14 +622,19 @@ fn passthrough<T: AsRef<str>>(
 /// Agents search from absolute roots, so `-l` output restates the same long prefix on every
 /// line; that prefix is the whole redundancy of the list. The transform is lossless (each path
 /// is `prefix + tail`) and needs no cap or tee. `None` when there is nothing to fold: fewer
-/// than two lines, a line that is not a plain path (empty, or NUL-joined under `-Z`), or no
-/// shared directory component. The prefix is cut on whole components, never inside one, so
+/// than two lines, a line that is not a plain path (empty, NUL-joined under `-Z`, carrying a
+/// `\r` that `lines()` would drop, or an escape such as an rg `--hyperlink-format` OSC 8 link
+/// that `strip_ansi` leaves in place), or no shared directory component. The prefix is cut on whole components, never inside one, so
 /// `/a/foobar/x` and `/a/foobaz/y` share `/a/`, not `/a/fooba`.
 ///
 /// KNOWN LIMITATION: only `/` separates components, so Windows-style `\` paths never fold.
 fn fold_path_prefix(raw: &str) -> Option<String> {
+    // Checked on the raw text: `lines()` would already have dropped a `\r` before `\n`.
+    if raw.contains(['\0', '\r', '\x1b']) {
+        return None;
+    }
     let paths: Vec<&str> = raw.lines().collect();
-    if paths.len() < 2 || paths.iter().any(|p| p.is_empty() || p.contains('\0')) {
+    if paths.len() < 2 || paths.iter().any(|p| p.is_empty()) {
         return None;
     }
 
@@ -1328,6 +1333,12 @@ mod tests {
             fold_path_prefix("/a/b.rs\0/a/c.rs\0"),
             None,
             "NUL-joined (-Z)"
+        );
+        assert_eq!(fold_path_prefix("/a/x\r\n/a/y\n"), None, "CR in a name");
+        assert_eq!(
+            fold_path_prefix("\x1b]8;;file:///a/x\x1b\\/a/x\n\x1b]8;;file:///a/y\x1b\\/a/y\n"),
+            None,
+            "OSC 8 hyperlink"
         );
     }
 
