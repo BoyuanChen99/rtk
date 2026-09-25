@@ -1,5 +1,6 @@
 //! `-l` / `-L` / `--files` passthrough folds the directory prefix every path shares into a
 //! `<prefix> (N files)` header. Any other shape flag on top of the list leaves it verbatim.
+#![cfg(unix)]
 
 use std::path::Path;
 use std::process::Command;
@@ -119,17 +120,17 @@ fn null_joined_list_is_verbatim() {
     let dir = fixture();
     let src = dir.path().join("src");
     let out = rtk()
-        .args(["grep", "-rlZ", "needle", src.to_str().unwrap()])
+        .args(["grep", "-rl", "--null", "needle", src.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains('\0'),
-        "-Z output must stay NUL-joined:\n{stdout:?}"
+        "--null output must stay NUL-joined:\n{stdout:?}"
     );
     assert!(
         !stdout.contains("files)"),
-        "no header under -Z:\n{stdout:?}"
+        "no header under --null:\n{stdout:?}"
     );
     assert_eq!(
         stdout.matches(&src_prefix(dir.path())).count(),
@@ -148,11 +149,12 @@ fn count_with_list_is_verbatim() {
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("files)"), "no header under -c:\n{stdout}");
-    assert_eq!(
-        stdout.matches(&src_prefix(dir.path())).count(),
-        3,
-        "{stdout}"
-    );
+    // GNU grep lets -l win over -c, BSD grep prints both; either way rtk forwards it as is.
+    let raw = Command::new("grep")
+        .args(["-rlc", "needle", src.to_str().unwrap()])
+        .output()
+        .expect("grep");
+    assert_eq!(stdout, String::from_utf8_lossy(&raw.stdout));
 }
 
 #[test]
