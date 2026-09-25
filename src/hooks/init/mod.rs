@@ -383,7 +383,7 @@ pub fn run(
                 }
             }
 
-            // Cursor hooks (additive, installed alongside Claude Code)
+            // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
             if install_cursor {
                 install_cursor_hooks(ctx)?;
             }
