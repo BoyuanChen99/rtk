@@ -286,6 +286,9 @@ enum Commands {
     },
 
     /// Ultra-condensed diff (only changed lines)
+    ///
+    /// Comparing two files exits 0 if identical, 1 if different, and 2 on a
+    /// file-read error. Non-UTF-8 files are compared byte for byte.
     Diff {
         /// First file or - for stdin (unified diff)
         file1: PathBuf,
