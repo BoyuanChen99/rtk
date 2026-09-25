@@ -5,7 +5,6 @@ use crate::hooks::constants::{
     HOOKS_JSON, PRE_TOOL_USE_KEY, TRAE_CN_DIR, TRAE_DIR, TRAE_HOOK_COMMAND,
     TRAE_RUN_COMMAND_MATCHER,
 };
-use crate::hooks::is_trae_hook_command;
 
 /// Return the hook files Trae uses below `home`.
 ///
@@ -187,91 +186,44 @@ fn trae_group_covers_run_command(group: &serde_json::Value) -> bool {
 /// type we write. A missing `type` is ours too, since a hand-written
 /// registration commonly omits it; any other explicit type is the user's.
 fn is_trae_hook_entry(hook: &serde_json::Value) -> bool {
-    let is_our_command = hook
-        .get("command")
-        .and_then(|command| command.as_str())
-        .is_some_and(is_trae_hook_command);
-    let is_command_type = match hook.get("type") {
-        None => true,
-        Some(hook_type) => hook_type.as_str() == Some("command"),
-    };
-    is_our_command && is_command_type
+    is_command_hook(hook, is_trae_hook_command)
 }
 
-fn trae_hook_already_present(root: &serde_json::Value) -> bool {
-    root.get("hooks")
-        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
-        .and_then(|groups| groups.as_array())
-        .is_some_and(|groups| {
-            groups.iter().any(|group| {
-                trae_group_covers_run_command(group)
-                    && group
-                        .get("hooks")
-                        .and_then(|hooks| hooks.as_array())
-                        .is_some_and(|hooks| hooks.iter().any(is_trae_hook_entry))
-            })
-        })
+pub(super) fn trae_hook_already_present(root: &serde_json::Value) -> bool {
+    hook_present(
+        root,
+        PRE_TOOL_USE_KEY,
+        HookEntries::Grouped,
+        trae_group_covers_run_command,
+        is_trae_hook_entry,
+    )
 }
 
-fn insert_trae_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+pub(super) fn insert_trae_hook_entry(root: &mut serde_json::Value) -> Result<()> {
     validate_trae_hooks_json(root)?;
-
-    let root_object = root.as_object_mut().expect("validated object");
-
-    root_object.entry("version").or_insert(serde_json::json!(1));
-    let hooks = root_object
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .context("Trae hooks value is not an object")?;
-    let pre_tool_use = hooks
-        .entry(PRE_TOOL_USE_KEY)
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .context("Trae PreToolUse value is not an array")?;
-
-    pre_tool_use.push(serde_json::json!({
-        "matcher": TRAE_RUN_COMMAND_MATCHER,
-        "hooks": [{
-            "type": "command",
-            "command": TRAE_HOOK_COMMAND,
-            "timeout": 30
-        }]
-    }));
-    Ok(())
+    root.as_object_mut()
+        .expect("validated object")
+        .entry("version")
+        .or_insert(serde_json::json!(1));
+    append_hook_entry(
+        root,
+        PRE_TOOL_USE_KEY,
+        serde_json::json!({
+            "matcher": TRAE_RUN_COMMAND_MATCHER,
+            "hooks": [{"type": "command", "command": TRAE_HOOK_COMMAND, "timeout": 30}]
+        }),
+    )
 }
 
 /// Remove RTK commands from nested Trae PreToolUse groups. A group is pruned
 /// only when removing RTK made its nested `hooks` array empty.
-fn remove_trae_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let Some(groups) = root
-        .get_mut("hooks")
-        .and_then(|hooks| hooks.get_mut(PRE_TOOL_USE_KEY))
-        .and_then(|groups| groups.as_array_mut())
-    else {
-        return false;
-    };
-
-    let mut removed = false;
-    groups.retain_mut(|group| {
-        let Some(hooks) = group
-            .get_mut("hooks")
-            .and_then(|hooks| hooks.as_array_mut())
-        else {
-            return true;
-        };
-
-        let original_len = hooks.len();
-        hooks.retain(|hook| !is_trae_hook_entry(hook));
-        if hooks.len() == original_len {
-            return true;
-        }
-
-        removed = true;
-        !hooks.is_empty()
-    });
-
-    removed
+pub(super) fn remove_trae_hook_from_json(root: &mut serde_json::Value) -> bool {
+    remove_hook_entries(
+        root,
+        PRE_TOOL_USE_KEY,
+        HookEntries::Grouped,
+        is_trae_hook_entry,
+    )
 }
 
 /// Install Trae's native PreToolUse hook in the project or user configuration.
@@ -394,9 +346,38 @@ pub fn uninstall_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+/// Matches this agent's RTK hook command: `rtk hook trae` from a bare, absolute or
+/// Windows `rtk` path, and nothing else.
+fn is_trae_hook_command(command: &str) -> bool {
+    crate::hooks::is_rtk_hook_command(command, "trae")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trae_hook_command_matches_bare_and_absolute_rtk() {
+        assert!(is_trae_hook_command("rtk hook trae"));
+        assert!(is_trae_hook_command("/opt/homebrew/bin/rtk hook trae"));
+        assert!(is_trae_hook_command("\"/opt/homebrew/bin/rtk\" hook trae"));
+        assert!(!is_trae_hook_command("rtk hook claude"));
+    }
+
+    #[test]
+    fn trae_hook_command_matches_windows_rtk_and_rejects_other_commands() {
+        assert!(is_trae_hook_command("rtk.exe hook trae"));
+        assert!(is_trae_hook_command(
+            r#""C:\Program Files\rtk.exe" hook trae"#
+        ));
+        for command in [
+            "not-rtk.exe hook trae",
+            "echo rtk.exe hook trae",
+            "rtk.exe hook codex",
+        ] {
+            assert!(!is_trae_hook_command(command));
+        }
+    }
 
     #[test]
     fn test_trae_hook_paths_include_trae_cn_only_when_its_directory_exists() {

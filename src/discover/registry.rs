@@ -1,5 +1,6 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
@@ -1532,6 +1533,18 @@ fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
     !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
 }
 
+/// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
+/// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
+fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
+    let engine = match rtk_cmd {
+        "rtk grep" => Engine::Grep,
+        "rtk rg" => Engine::Rg,
+        _ => return true,
+    };
+    let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
+    !is_bare_file_list(engine, &args)
+}
+
 pub(crate) enum ExcludePattern {
     Regex(Regex),
     Prefix(String),
@@ -1761,7 +1774,8 @@ fn rewrite_segment_inner(
     // #3171
     if context == RewriteContext::PipelineProducer
         && (!rule.pipeline_safety.producer_safe()
-            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part))
+            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part)
+            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part))
     {
         return None;
     }
@@ -3811,6 +3825,28 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("grep foo src/main.rs | head -5", &[]),
             Some("rtk grep foo src/main.rs | head -5".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_file_list_stays_raw() {
+        // A folded list keeps its prefix in the first line, which `tail` drops.
+        for cmd in [
+            "grep -rl foo src | tail -3",
+            "grep -rL foo . | head -5",
+            "rg -l foo | tail",
+            "rg --files src | cat",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        // `-c` with `-l` is not folded, and `-e -l` makes `-l` the pattern.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rlc foo src | tail -3", &[]),
+            Some("rtk grep -rlc foo src | tail -3".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -e -l src | tail -3", &[]),
+            Some("rtk grep -e -l src | tail -3".into())
         );
     }
 

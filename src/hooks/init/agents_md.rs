@@ -1,11 +1,10 @@
-//! Shared RTK.md block management and AGENTS.md helpers (agent-agnostic).
+//! Instructions-file block helpers shared by every agent that writes one (RTK block upsert and
+//! removal), and the AGENTS.md reference helpers the Codex flow uses.
 
 use super::*;
 
-// --- upsert_rtk_block: idempotent RTK block management ---
-
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RtkBlockUpsert {
+pub(super) enum RtkBlockUpsert {
     /// No existing block found — appended new block
     Added,
     /// Existing block found with different content — replaced
@@ -20,7 +19,7 @@ pub(crate) enum RtkBlockUpsert {
 ///
 /// Returns `(new_content, action)` describing what happened.
 /// The caller decides whether to write `new_content` based on `action`.
-pub(crate) fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
+fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
     let start_marker = RTK_BLOCK_START;
     let end_marker = RTK_BLOCK_END;
 
@@ -77,7 +76,7 @@ pub(crate) fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockU
 ///
 /// `label` is shown in user-facing messages (e.g., `"rtk instructions"`,
 /// `"Copilot instructions"`).
-pub(crate) fn write_rtk_block(
+pub(super) fn write_rtk_block(
     path: &Path,
     block: &str,
     label: &str,
@@ -144,7 +143,8 @@ pub(crate) fn write_rtk_block(
     Ok(action)
 }
 
-pub(crate) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
+/// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
+pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -232,14 +232,14 @@ pub(crate) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     Ok(true)
 }
 
-pub(crate) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
+pub(super) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
     content
         .lines()
         .map(str::trim)
         .any(|line| refs.contains(&line))
 }
 
-pub(crate) fn remove_rtk_reference_from_agents(
+pub(super) fn remove_rtk_reference_from_agents(
     path: &Path,
     refs: &[&str],
     ctx: InitContext,
@@ -291,8 +291,9 @@ pub(crate) fn remove_rtk_reference_from_agents(
     Ok(true)
 }
 
-/// Remove old RTK block from CLAUDE.md (migration helper)
-pub(crate) fn remove_rtk_block(content: &str) -> (String, bool) {
+/// Strip the inline RTK block from an instructions file's content, returning the cleaned
+/// text and whether a block was removed.
+pub(super) fn remove_rtk_block(content: &str) -> (String, bool) {
     if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
         let end_pos = end + RTK_BLOCK_END.len();
         let before = content[..start].trim_end();

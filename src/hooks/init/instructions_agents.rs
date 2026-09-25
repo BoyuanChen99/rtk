@@ -1,9 +1,28 @@
-/// Instruction-only agents: configured by writing an instructions file, no hook installed.
+//! Instruction-only agents: configured by writing an instructions file, no hook installed.
+
 use super::*;
+
+/// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
+/// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
+/// tells the user why their configured `awareness.level` was not applied.
+fn print_instructions_agents_awareness_note(agent: &str, ctx: InitContext) {
+    let prefix = if ctx.dry_run { "[dry-run] " } else { "  " };
+    let ignored = if ctx.awareness == AwarenessLevel::Full {
+        String::new()
+    } else {
+        format!(
+            " (config awareness.level = \"{}\" does not apply here)",
+            ctx.awareness
+        )
+    };
+    println!(
+        "{prefix}Awareness: full — {agent} has no command hook, so the agent is told to prefix rtk itself{ignored}"
+    );
+}
 
 // Cline / Roo Code support
 
-pub(crate) fn run_cline_mode(ctx: InitContext) -> Result<()> {
+pub(super) fn run_cline_mode(ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -50,7 +69,7 @@ pub(crate) fn run_cline_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
+pub(super) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -104,7 +123,7 @@ pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
     run_kilocode_mode_at(&std::env::current_dir()?, ctx)
 }
 
-pub(crate) fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -163,7 +182,7 @@ pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
     run_antigravity_mode_at(&std::env::current_dir()?, ctx)
 }
 
-pub(crate) fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -228,7 +247,7 @@ pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
     run_kimi_mode_at(&std::env::current_dir()?, ctx)
 }
 
-pub(crate) fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     // Kimi reads AGENTS.md from the project root (workspace-scoped).
     let agents_md_path = base_dir.join(AGENTS_MD);
 
@@ -253,6 +272,7 @@ pub(crate) fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use super::codex::{codex_rtk_md_content, run_codex_mode_with_paths};
     use super::*;
     use tempfile::TempDir;
 

@@ -1,15 +1,18 @@
 //! Cursor agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    CURSOR_DIR, CURSOR_HOOK_COMMAND, HOOKS_JSON, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+};
 
 // Cursor Agent support
 
-pub(crate) fn resolve_cursor_dir() -> Result<PathBuf> {
+pub(super) fn resolve_cursor_dir() -> Result<PathBuf> {
     resolve_home_subdir(CURSOR_DIR)
 }
 
 /// Install Cursor hooks: register binary command in hooks.json
-pub(crate) fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
+pub(super) fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -66,10 +69,8 @@ pub(crate) fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
-pub(crate) fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 }));
 
     // Check idempotency
@@ -82,86 +83,61 @@ pub(crate) fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<b
 
     insert_cursor_hook_entry(&mut root)?;
 
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-
-    if dry_run {
-        println!(
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "hooks.json",
+        &format!(
             "[dry-run] would patch Cursor hooks.json: {}",
             path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
-        return Ok(true);
-    }
-
-    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)?
-        && verbose > 0
-    {
-        eprintln!("Backup: {}", backup_path.display());
-    }
+        ),
+        true,
+        Written::Backup,
+    )?;
 
     Ok(true)
 }
 
 /// Check if RTK preToolUse hook is already present in Cursor hooks.json
 /// Matches on legacy rtk-rewrite.sh path OR new `rtk hook cursor` command
-pub(crate) fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
-    let hooks = match root
-        .get("hooks")
-        .and_then(|h| h.get("preToolUse"))
-        .and_then(|p| p.as_array())
-    {
-        Some(arr) => arr,
-        None => return false,
-    };
+pub(super) fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
+    hook_present(
+        root,
+        "preToolUse",
+        HookEntries::Flat,
+        |entry| group_covers_tool(entry, "Shell"),
+        is_cursor_hook_entry,
+    )
+}
 
-    hooks.iter().any(|entry| {
-        entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND)
+fn is_cursor_hook_entry(hook: &serde_json::Value) -> bool {
+    is_command_hook(hook, |cmd| {
+        cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND
     })
 }
 
 /// Insert RTK preToolUse entry into Cursor hooks.json
-pub(crate) fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
-    let root_obj = match root.as_object_mut() {
-        Some(obj) => obj,
-        None => {
-            *root = serde_json::json!({ "version": 1 });
-            root.as_object_mut().expect("just-created json object")
-        }
-    };
-
-    root_obj.entry("version").or_insert(serde_json::json!(1));
-
-    let hooks = root_obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .context("hooks value is not an object")?;
-
-    let pre_tool_use = hooks
-        .entry("preToolUse")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .context("preToolUse value is not an array")?;
-
-    pre_tool_use.push(serde_json::json!({
-        "command": CURSOR_HOOK_COMMAND,
-        "matcher": "Shell"
-    }));
-    Ok(())
+fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    if !root.is_object() {
+        *root = serde_json::json!({});
+    }
+    root.as_object_mut()
+        .expect("object")
+        .entry("version")
+        .or_insert(serde_json::json!(1));
+    append_hook_entry(
+        root,
+        "preToolUse",
+        serde_json::json!({
+            "command": CURSOR_HOOK_COMMAND, "matcher": "Shell"
+        }),
+    )
 }
 
 /// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
 /// Preserves any existing `rtk hook cursor` entries (new format).
-pub(crate) fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
     let Some(mut root) = read_json_file(path)? else {
         return Ok(());
     };
@@ -170,50 +146,33 @@ pub(crate) fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitCont
         return Ok(());
     }
 
-    if dry_run {
-        println!(
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "hooks.json",
+        &format!(
             "[dry-run] would remove legacy rtk-rewrite.sh entry from Cursor hooks.json: {}",
             path.display()
-        );
-        return Ok(());
-    }
-
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    backup_and_atomic_write(path, &serialized)?;
-
-    if verbose > 0 {
-        eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json");
-    }
-    Ok(())
+        ),
+        false,
+        Written::Line(
+            "  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json".to_string(),
+        ),
+    )
 }
 
 /// Remove only legacy `rtk-rewrite.sh` entries from parsed Cursor hooks.json.
 /// Returns true if any entries were removed.
 /// Does NOT remove `rtk hook cursor` entries — those are the new format.
-pub(crate) fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
-    let pre_tool_use = match root
-        .get_mut("hooks")
-        .and_then(|h| h.get_mut("preToolUse"))
-        .and_then(|p| p.as_array_mut())
-    {
-        Some(arr) => arr,
-        None => return false,
-    };
-
-    let original_len = pre_tool_use.len();
-    pre_tool_use.retain(|entry| {
-        !entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
-    });
-
-    pre_tool_use.len() < original_len
+pub(super) fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
+    remove_hook_entries(root, "preToolUse", HookEntries::Flat, |hook| {
+        is_command_hook(hook, |cmd| cmd.contains(REWRITE_HOOK_FILE))
+    })
 }
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
-pub(crate) fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
+pub(super) fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
     let cursor_dir = resolve_cursor_dir()?;
     remove_cursor_hooks_at(&cursor_dir, ctx)
 }
@@ -221,31 +180,12 @@ pub(crate) fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
 /// Remove RTK preToolUse entry from Cursor hooks.json
 /// Returns true if entry was found and removed
 /// Matches both legacy script path and new binary command
-pub(crate) fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let pre_tool_use = match root
-        .get_mut("hooks")
-        .and_then(|h| h.get_mut("preToolUse"))
-        .and_then(|p| p.as_array_mut())
-    {
-        Some(arr) => arr,
-        None => return false,
-    };
-
-    let original_len = pre_tool_use.len();
-    pre_tool_use.retain(|entry| {
-        !entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND)
-    });
-
-    pre_tool_use.len() < original_len
+fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
+    remove_hook_entries(root, "preToolUse", HookEntries::Flat, is_cursor_hook_entry)
 }
 
 fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+    let InitContext { dry_run, .. } = ctx;
     let mut removed = Vec::new();
 
     // 1. Remove hook script
@@ -280,20 +220,18 @@ fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<Str
     if let Some(mut root) = root
         && remove_cursor_hook_from_json(&mut root)
     {
-        if dry_run {
-            println!(
+        update_json_file(
+            &hooks_json_path,
+            &root,
+            ctx,
+            "hooks.json",
+            &format!(
                 "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
                 hooks_json_path.display()
-            );
-        } else {
-            let serialized =
-                serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-            backup_and_atomic_write(&hooks_json_path, &serialized)?;
-
-            if verbose > 0 {
-                eprintln!("Removed RTK hook from Cursor hooks.json");
-            }
-        }
+            ),
+            false,
+            Written::Line("Removed RTK hook from Cursor hooks.json".to_string()),
+        )?;
         removed.push("Cursor hooks.json: removed RTK entry".to_string());
     }
 
@@ -303,6 +241,27 @@ fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cursor_registration_preserves_prompt_and_unrelated_entries() {
+        let mut root = serde_json::json!({"hooks": {"preToolUse": [
+            {"matcher": "Read", "command": CURSOR_HOOK_COMMAND},
+            {"matcher": "Shell", "type": "prompt", "command": CURSOR_HOOK_COMMAND},
+            {"matcher": "Shell", "command": "echo user"}
+        ]}});
+        assert!(!cursor_hook_already_present(&root));
+        insert_cursor_hook_entry(&mut root).unwrap();
+        assert!(cursor_hook_already_present(&root));
+        assert!(remove_cursor_hook_from_json(&mut root));
+        assert!(!remove_cursor_hook_from_json(&mut root));
+        assert_eq!(
+            root["hooks"]["preToolUse"],
+            serde_json::json!([
+                {"matcher": "Shell", "type": "prompt", "command": CURSOR_HOOK_COMMAND},
+                {"matcher": "Shell", "command": "echo user"}
+            ])
+        );
+    }
 
     // Cursor hooks.json tests
 

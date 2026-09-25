@@ -1,6 +1,10 @@
 //! Copilot agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR, GITHUB_DIR,
+    HOOKS_SUBDIR,
+};
 
 // Copilot integration
 
@@ -27,7 +31,7 @@ pub(crate) const COPILOT_HOOK_JSON: &str = r#"{
 }
 "#;
 
-pub(crate) const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
+const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 # RTK — Token-Optimized CLI
 
 **rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
@@ -67,7 +71,7 @@ pub fn run_copilot(ctx: InitContext) -> Result<()> {
 ///
 /// Used by tests to avoid mutating process-global `cwd` (which is racy under
 /// `cargo test`'s default parallel execution).
-pub(crate) fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
+fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let github_dir = base.join(GITHUB_DIR);
     let hooks_dir = github_dir.join(HOOKS_SUBDIR);
@@ -136,7 +140,7 @@ pub fn uninstall_copilot(ctx: InitContext) -> Result<()> {
 }
 
 /// Same as [`uninstall_copilot`] but operates relative to an explicit base path.
-pub(crate) fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext { dry_run, .. } = ctx;
     let github_dir = base.join(GITHUB_DIR);
     let mut removed = Vec::new();
@@ -185,11 +189,12 @@ pub(crate) fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<
 }
 
 pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
-    if let Ok(custom) = std::env::var(COPILOT_HOME_ENV) {
-        return Ok(PathBuf::from(custom));
-    }
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(COPILOT_USER_DIR))
+    resolve_config_dir(
+        std::env::var_os(COPILOT_HOME_ENV),
+        dirs::home_dir(),
+        COPILOT_USER_DIR,
+        "Cannot determine Copilot config directory. Set $COPILOT_HOME or $HOME.",
+    )
 }
 
 pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
@@ -197,7 +202,7 @@ pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
     run_copilot_global_at(&copilot_dir, ctx)
 }
 
-pub(crate) fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
+fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let hooks_dir = copilot_dir.join(HOOKS_SUBDIR);
 
@@ -264,10 +269,7 @@ pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn uninstall_copilot_global_at(
-    copilot_dir: &Path,
-    ctx: InitContext,
-) -> Result<Vec<String>> {
+fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext { dry_run, .. } = ctx;
     let hook_path = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
     let mut removed = Vec::new();

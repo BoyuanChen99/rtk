@@ -1,8 +1,7 @@
 //! Codex agent: hook install/uninstall helpers.
 
 use super::*;
-use crate::hooks::constants::CODEX_HOOK_COMMAND;
-use crate::hooks::is_codex_hook_command;
+use crate::hooks::constants::{CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
 use std::path::Component;
 
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
@@ -19,7 +18,7 @@ const RTK_MD_OWNED_HEADER: &str =
     "<!-- rtk-owned: written by `rtk init --codex`, removed by `rtk init --codex --uninstall` -->";
 
 /// The `RTK.md` the Codex mode writes: RTK's ownership line, then the awareness payload.
-pub(crate) fn codex_rtk_md_content(level: AwarenessLevel) -> String {
+pub(super) fn codex_rtk_md_content(level: AwarenessLevel) -> String {
     format!("{RTK_MD_OWNED_HEADER}\n\n{}", awareness_content(level))
 }
 
@@ -444,7 +443,7 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(crate) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -522,7 +521,7 @@ fn codex_uninstall_report(
     report
 }
 
-pub(crate) fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
     uninstall_codex_with_paths(
         &codex_dir.join(AGENTS_MD),
@@ -534,7 +533,7 @@ pub(crate) fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<V
     )
 }
 
-pub(crate) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
+pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
     let (agents_md_path, rtk_md_path, hooks_json_path) = if global {
         let codex_dir = resolve_codex_dir()?;
         (
@@ -600,7 +599,7 @@ fn back_up_foreign_rtk_md(
     Ok(Some(backup))
 }
 
-pub(crate) fn run_codex_mode_with_paths(
+pub(super) fn run_codex_mode_with_paths(
     agents_md_path: PathBuf,
     rtk_md_path: PathBuf,
     hooks_json_path: PathBuf,
@@ -695,31 +694,30 @@ pub(crate) fn run_codex_mode_with_paths(
     Ok(())
 }
 
-pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
+fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
     )
 }
 
-pub(crate) fn resolve_codex_dir_from(
+fn resolve_codex_dir_from(
     codex_home: Option<PathBuf>,
     home_dir: Option<PathBuf>,
 ) -> Result<PathBuf> {
-    if let Some(path) = codex_home.filter(|path| !path.as_os_str().is_empty()) {
-        return Ok(path);
-    }
-
-    home_dir
-        .map(|home| home.join(CODEX_DIR))
-        .context("Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.")
+    resolve_config_dir(
+        codex_home.map(PathBuf::into_os_string),
+        home_dir,
+        CODEX_DIR,
+        "Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.",
+    )
 }
 
-pub(crate) fn codex_rtk_md_ref(codex_dir: &Path) -> String {
+fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
 }
 
-pub(crate) fn show_codex_config() -> Result<()> {
+pub(super) fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
     let global_agents_md = codex_dir.join(AGENTS_MD);
     let global_rtk_md = codex_dir.join(RTK_MD);
@@ -737,23 +735,7 @@ pub(crate) fn show_codex_config() -> Result<()> {
         println!("[--] Global RTK.md: not found");
     }
 
-    if global_hooks_json.exists() {
-        let content = fs::read_to_string(&global_hooks_json).with_context(|| {
-            format!(
-                "Failed to read global Codex hooks: {}",
-                global_hooks_json.display()
-            )
-        })?;
-        match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(root) if codex_hook_already_present(&root) => {
-                println!("[ok] Global hook: {}", global_hooks_json.display());
-            }
-            Ok(_) => println!("[--] Global hooks.json exists but RTK hook is not configured"),
-            Err(_) => println!("[!!] Global hooks.json is invalid JSON"),
-        }
-    } else {
-        println!("[--] Global hook: not found");
-    }
+    print_codex_hook_status("Global", &global_hooks_json)?;
 
     if global_agents_md.exists() {
         let content = fs::read_to_string(&global_agents_md).with_context(|| {
@@ -787,23 +769,7 @@ pub(crate) fn show_codex_config() -> Result<()> {
         println!("[--] Local RTK.md: not found");
     }
 
-    if local_hooks_json.exists() {
-        let content = fs::read_to_string(&local_hooks_json).with_context(|| {
-            format!(
-                "Failed to read local Codex hooks: {}",
-                local_hooks_json.display()
-            )
-        })?;
-        match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(root) if codex_hook_already_present(&root) => {
-                println!("[ok] Local hook: {}", local_hooks_json.display());
-            }
-            Ok(_) => println!("[--] Local hooks.json exists but RTK hook is not configured"),
-            Err(_) => println!("[!!] Local hooks.json is invalid JSON"),
-        }
-    } else {
-        println!("[--] Local hook: not found");
-    }
+    print_codex_hook_status("Local", &local_hooks_json)?;
 
     if local_agents_md.exists() {
         let content = fs::read_to_string(&local_agents_md).with_context(|| {
@@ -829,6 +795,21 @@ pub(crate) fn show_codex_config() -> Result<()> {
     println!("  rtk init --codex --uninstall     # Remove local Codex RTK artifacts");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
+    Ok(())
+}
+
+fn print_codex_hook_status(label: &str, path: &Path) -> Result<()> {
+    match read_json_file(path) {
+        Ok(Some(root)) if codex_hook_already_present(&root) => {
+            println!("[ok] {label} hook: {}", path.display())
+        }
+        Ok(Some(_)) => println!("[--] {label} hooks.json exists but RTK hook is not configured"),
+        Ok(None) => println!("[--] {label} hook: not found"),
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+            println!("[!!] {label} hooks.json is invalid JSON")
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 
@@ -918,21 +899,18 @@ fn codex_tracking_config(db_path: &Path) -> Result<String> {
     ))
 }
 
-fn codex_hook_already_present(root: &serde_json::Value) -> bool {
-    root.pointer("/hooks/PreToolUse")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("hooks")?.as_array())
-        .flatten()
-        .filter_map(|hook| hook.get("command")?.as_str())
-        .any(is_codex_hook_command)
+pub(super) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
+    hook_present(
+        root,
+        PRE_TOOL_USE_KEY,
+        HookEntries::Grouped,
+        |group| group_covers_tool(group, "Bash"),
+        |hook| is_command_hook(hook, is_codex_hook_command),
+    )
 }
 
 fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+    let InitContext { dry_run, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if codex_hook_already_present(&root) {
@@ -940,18 +918,8 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
     }
 
     insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
 
-    if dry_run {
-        println!("[dry-run] would patch Codex hooks: {}", path.display());
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
-        return Ok(true);
-    }
-
-    if let Some(parent) = path.parent() {
+    if !dry_run && let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
                 "Failed to create Codex config directory: {}",
@@ -959,53 +927,26 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
             )
         })?;
     }
-    backup_and_atomic_write(path, &serialized)?;
-    if verbose > 0 {
-        eprintln!("Patched Codex hooks: {}", path.display());
-    }
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "Codex hooks.json",
+        &format!("[dry-run] would patch Codex hooks: {}", path.display()),
+        true,
+        Written::Line(format!("Patched Codex hooks: {}", path.display())),
+    )?;
 
     Ok(true)
 }
 
-fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let Some(pre_tool_use) = root
-        .pointer_mut("/hooks/PreToolUse")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return false;
-    };
-
-    let mut removed = false;
-    for entry in pre_tool_use.iter_mut() {
-        let Some(hooks) = entry
-            .get_mut("hooks")
-            .and_then(serde_json::Value::as_array_mut)
-        else {
-            continue;
-        };
-        let before = hooks.len();
-        hooks.retain(|hook| {
-            !hook
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(is_codex_hook_command)
-        });
-        removed |= hooks.len() != before;
-    }
-    pre_tool_use.retain(|entry| {
-        entry
-            .get("hooks")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(|hooks| !hooks.is_empty())
-    });
-
-    removed
+pub(super) fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
+    remove_hook_entries(root, PRE_TOOL_USE_KEY, HookEntries::Grouped, |hook| {
+        is_command_hook(hook, is_codex_hook_command)
+    })
 }
 
 fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
     let Some(mut root) = read_json_file(path)? else {
         return Ok(false);
     };
@@ -1013,32 +954,48 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(false);
     }
 
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
-    if dry_run {
-        println!(
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "Codex hooks.json",
+        &format!(
             "[dry-run] would remove RTK hook entry from {}",
             path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
-        return Ok(true);
-    }
-
-    backup_and_atomic_write(path, &serialized)?;
-    if verbose > 0 {
-        eprintln!("Removed Codex RTK hook: {}", path.display());
-    }
+        ),
+        true,
+        Written::Line(format!("Removed Codex RTK hook: {}", path.display())),
+    )?;
 
     Ok(true)
+}
+
+/// Matches this agent's RTK hook command: `rtk hook codex` from a bare, absolute or
+/// Windows `rtk` path, and nothing else.
+fn is_codex_hook_command(command: &str) -> bool {
+    crate::hooks::is_rtk_hook_command(command, "codex")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::constants::CODEX_HOOK_COMMAND;
     use tempfile::TempDir;
+
+    #[test]
+    fn codex_hook_command_matches_bare_absolute_and_windows_rtk() {
+        assert!(is_codex_hook_command("rtk hook codex"));
+        assert!(is_codex_hook_command("/opt/homebrew/bin/rtk hook codex"));
+        assert!(is_codex_hook_command(
+            "\"C:\\Program Files\\rtk.exe\" hook codex"
+        ));
+    }
+
+    #[test]
+    fn codex_hook_command_rejects_other_commands() {
+        assert!(!is_codex_hook_command("rtk hook claude"));
+        assert!(!is_codex_hook_command("echo rtk hook codex"));
+        assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
+    }
 
     #[test]
     fn test_codex_mode_rejects_auto_patch() {
@@ -1612,6 +1569,9 @@ mod tests {
         assert!(!rtk_md.with_extension("md.bak").exists());
     }
 
+    /// The guard exists to keep a write inside the project, not to strand the files that are
+    /// already inside it: refusing to clean those leaves artifacts with no command to remove
+    /// them, since `--global` acts on a different directory.
     #[test]
     fn test_uninstall_cleans_the_project_even_without_the_hook_file() {
         let dir = TempDir::new().expect("tempdir");
@@ -1668,6 +1628,8 @@ mod tests {
         );
     }
 
+    /// `fs::copy` follows a symlink at the destination, so the backup sibling carries the
+    /// existing hooks out of the project while `.codex` itself is an ordinary directory.
     #[cfg(unix)]
     #[test]
     fn test_the_backup_destination_must_stay_inside_the_project_too() {
@@ -1695,6 +1657,9 @@ mod tests {
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
+    /// A link chain leaves the project at whichever hop points out of it, and that need not
+    /// be the first. While any hop dangles, `canonicalize` reports the whole chain as sitting
+    /// where it broke, so only walking it hop by hop says where a write would land.
     #[cfg(unix)]
     #[test]
     fn test_a_symlink_chain_is_followed_past_its_first_hop() {
@@ -1730,6 +1695,8 @@ mod tests {
         );
     }
 
+    /// A link in the middle of the chain is a place the write can land, so pointing it back
+    /// into the project must not buy it a pass: the far end is not the only thing that moves.
     #[cfg(unix)]
     #[test]
     fn test_a_link_partway_along_the_chain_may_not_sit_outside() {
@@ -1755,6 +1722,7 @@ mod tests {
         );
     }
 
+    /// The bound counts hops followed, so a chain of exactly that length still resolves.
     #[cfg(unix)]
     #[test]
     fn test_a_chain_of_exactly_the_hop_limit_still_settles() {
@@ -1782,6 +1750,7 @@ mod tests {
         }
     }
 
+    /// One hop past the bound is where the walk must give up rather than keep going.
     #[cfg(unix)]
     #[test]
     fn test_a_chain_one_hop_past_the_limit_is_refused() {
@@ -1805,6 +1774,8 @@ mod tests {
         );
     }
 
+    /// A jump lands on a target that may itself sit behind symlinked ancestors the walk
+    /// never visited, so stopping at the jump reports two spellings of one directory.
     #[cfg(unix)]
     #[test]
     fn test_resolve_symlink_components_resolves_the_jumped_to_target() {
@@ -1873,6 +1844,8 @@ mod tests {
         }
     }
 
+    /// The ceiling test proves the probe refuses once every slot is taken; this proves it does
+    /// not refuse while one is still free. An off-by-one passes the first and fails this.
     #[test]
     fn test_the_final_backup_slot_is_offered_rather_than_skipped() {
         let tmp = TempDir::new().expect("tmp");
@@ -1933,6 +1906,8 @@ mod tests {
         );
     }
 
+    /// The walk must not cost the ordinary in-project symlink its write, and must terminate
+    /// on a chain that never ends.
     #[cfg(unix)]
     #[test]
     fn test_the_containment_walk_accepts_in_project_chains_and_stops_on_cycles() {
@@ -1954,6 +1929,8 @@ mod tests {
         assert!(error.to_string().contains("symlinks"), "{error}");
     }
 
+    /// A link above the file decides where the write lands just as the file's own link does,
+    /// and `canonicalize` cannot see past it either while its target is missing.
     #[cfg(unix)]
     #[test]
     fn test_a_symlinked_ancestor_is_resolved_even_while_it_dangles() {
@@ -1973,6 +1950,8 @@ mod tests {
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
+    /// `..` after a component that does not exist yet defeats resolution by ancestor, so the
+    /// comparison has to fold it in itself rather than compare the path as written.
     #[cfg(unix)]
     #[test]
     fn test_a_parent_hop_past_a_missing_component_is_folded_before_comparing() {
@@ -1988,6 +1967,9 @@ mod tests {
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
+    /// A chain can point back into the project and still be written outside it: with its end
+    /// missing, `atomic_write` cannot canonicalize either and lands on the last link itself,
+    /// wherever that link happens to sit.
     #[cfg(unix)]
     #[test]
     fn test_a_link_sitting_outside_is_refused_even_when_it_points_back_in() {
@@ -2008,6 +1990,8 @@ mod tests {
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
+    /// Which scope the project-scoped command runs in is a decision of its own: `--codex`
+    /// without `--global` must not treat the project root as a directory RTK owns.
     #[test]
     fn test_project_install_moves_a_user_authored_rtk_md_aside_rather_than_claiming_it() {
         let project = TempDir::new().expect("project");
@@ -2025,6 +2009,8 @@ mod tests {
         assert!(rtk_md_is_rtk_authored(&rtk_md), "and replaced by RTK's own");
     }
 
+    /// The same decision on the way out: uninstall must not remove a project-root `RTK.md`
+    /// RTK never wrote.
     #[test]
     fn test_project_uninstall_keeps_a_user_authored_rtk_md() {
         let project = TempDir::new().expect("project");
@@ -2041,6 +2027,9 @@ mod tests {
         );
     }
 
+    /// Uninstall rewrites `hooks.json` through [`backup_and_atomic_write`], whose `fs::copy`
+    /// follows a symlink at the destination, so its backup sibling needs vouching for even
+    /// when `.codex` itself is an ordinary directory.
     #[cfg(unix)]
     #[test]
     fn test_uninstall_refuses_a_backup_sibling_that_leaves_the_project() {
@@ -2076,6 +2065,7 @@ mod tests {
         );
     }
 
+    /// A file RTK cannot read is not provably RTK's, and guessing wrong here destroys it.
     #[cfg(unix)]
     #[test]
     fn test_an_unreadable_rtk_md_is_treated_as_the_users() {
@@ -2100,6 +2090,9 @@ mod tests {
         assert!(!removed.iter().any(|item| item.starts_with("RTK.md")));
     }
 
+    /// A list of what was removed reads as a complete uninstall, so a hook the guard refused
+    /// to touch has to appear in the same block -- and must not be called registered, which
+    /// RTK cannot know without reading the file it just refused.
     #[test]
     fn test_the_uninstall_report_carries_a_hook_it_did_not_check() {
         let removed = vec!["RTK.md: RTK.md".to_string()];
@@ -2127,6 +2120,8 @@ mod tests {
         assert!(nothing.contains("Not checked"), "{nothing}");
     }
 
+    /// The containment walk only protects anything if `run_codex_mode` still calls it, for
+    /// both paths. Driving the command rather than the helper is what says so.
     #[cfg(unix)]
     #[test]
     fn test_install_refuses_a_project_whose_codex_dir_leaves_it() {
@@ -2152,6 +2147,8 @@ mod tests {
         );
     }
 
+    /// The same, for the backup sibling: `fs::copy` follows a symlink at the destination, so
+    /// vouching only for `hooks.json` leaves the existing hooks free to travel.
     #[cfg(unix)]
     #[test]
     fn test_install_refuses_a_backup_sibling_that_leaves_the_project() {
@@ -2179,6 +2176,8 @@ mod tests {
         );
     }
 
+    /// Uninstall reads and rewrites `hooks.json`, so it needs the same vouching -- and must
+    /// still clean what it can, saying on stdout that the hook was left behind.
     #[cfg(unix)]
     #[test]
     fn test_uninstall_leaves_a_hooks_file_that_sits_outside_the_project_alone() {
@@ -2226,6 +2225,9 @@ mod tests {
         );
     }
 
+    /// Whole directory trees hang off a symlink on macOS, where `/var` is one: an absolute
+    /// target is normal traffic through such a link, and judging a link by where it sits
+    /// rather than by where it leads would refuse every project reached through one.
     #[cfg(unix)]
     #[test]
     fn test_an_absolute_target_may_travel_through_a_symlinked_ancestor() {
@@ -2265,6 +2267,9 @@ mod tests {
         assert_eq!(lexically_normalized(Path::new("/../a")), Path::new("/../a"));
     }
 
+    /// `--global` writes RTK.md into the Codex home, where RTK created it and nothing else
+    /// claims the name -- including every release that wrote it there before the marker
+    /// existed. Reading the marker in that scope would keep those files forever.
     #[test]
     fn test_global_codex_owns_its_rtk_md_with_or_without_the_marker() {
         let dir = TempDir::new().expect("tempdir");
@@ -2300,6 +2305,8 @@ mod tests {
         assert!(removed.iter().any(|item| item.starts_with("RTK.md")));
     }
 
+    /// An RTK-written block inside someone's own notes is a quotation, not a handover: the
+    /// file is theirs and uninstall leaves all of it, block included.
     #[test]
     fn test_codex_uninstall_keeps_notes_that_merely_contain_an_rtk_block() {
         let dir = TempDir::new().expect("tempdir");

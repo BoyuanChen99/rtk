@@ -1,27 +1,30 @@
 //! Hermes agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    HERMES_DIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+    HERMES_PLUGINS_SUBDIR,
+};
+use std::ffi::OsString;
 
 // Hermes support
 
-pub(crate) const HERMES_PLUGIN_INIT: &str =
-    include_str!("../../../hooks/hermes/rtk-rewrite/__init__.py");
+const HERMES_PLUGIN_INIT: &str = include_str!("../../../hooks/hermes/rtk-rewrite/__init__.py");
 
-pub(crate) const HERMES_PLUGIN_YAML: &str =
-    include_str!("../../../hooks/hermes/rtk-rewrite/plugin.yaml");
+const HERMES_PLUGIN_YAML: &str = include_str!("../../../hooks/hermes/rtk-rewrite/plugin.yaml");
 
 pub fn run_hermes_mode(ctx: InitContext) -> Result<()> {
     let hermes_home = resolve_hermes_home()?;
     run_hermes_mode_at(&hermes_home, ctx)
 }
 
-pub(crate) fn hermes_plugin_dir(hermes_home: &Path) -> PathBuf {
+fn hermes_plugin_dir(hermes_home: &Path) -> PathBuf {
     hermes_home
         .join(HERMES_PLUGINS_SUBDIR)
         .join(HERMES_PLUGIN_NAME)
 }
 
-pub(crate) fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
+fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let plugin_dir = hermes_plugin_dir(hermes_home);
     if !dry_run {
@@ -92,7 +95,7 @@ pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -150,15 +153,15 @@ pub(crate) fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Resul
     Ok(removed)
 }
 
-pub(crate) fn patch_hermes_config(existing: &str) -> String {
+fn patch_hermes_config(existing: &str) -> String {
     rewrite_hermes_config(existing, true)
 }
 
-pub(crate) fn unpatch_hermes_config(existing: &str) -> String {
+fn unpatch_hermes_config(existing: &str) -> String {
     rewrite_hermes_config(existing, false)
 }
 
-pub(crate) fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
+fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
     if existing.trim().is_empty() {
         return if add_rtk {
             hermes_plugins_block()
@@ -208,7 +211,7 @@ pub(crate) fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
     lines.concat()
 }
 
-pub(crate) fn split_yaml_lines(input: &str) -> Vec<String> {
+fn split_yaml_lines(input: &str) -> Vec<String> {
     if input.is_empty() {
         Vec::new()
     } else {
@@ -216,7 +219,7 @@ pub(crate) fn split_yaml_lines(input: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], insert_idx: usize) {
+fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], insert_idx: usize) {
     if insert_idx == 0 {
         return;
     }
@@ -228,11 +231,11 @@ pub(crate) fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], 
     }
 }
 
-pub(crate) fn hermes_plugins_block() -> String {
+fn hermes_plugins_block() -> String {
     format!("plugins:\n  enabled:\n    - {}\n", HERMES_PLUGIN_NAME)
 }
 
-pub(crate) fn append_hermes_plugins_block(existing: &str) -> String {
+fn append_hermes_plugins_block(existing: &str) -> String {
     let mut patched = existing.to_string();
     if !patched.ends_with('\n') {
         patched.push('\n');
@@ -241,7 +244,7 @@ pub(crate) fn append_hermes_plugins_block(existing: &str) -> String {
     patched
 }
 
-pub(crate) fn find_yaml_key_line(
+fn find_yaml_key_line(
     lines: &[String],
     key: &str,
     start: usize,
@@ -269,7 +272,7 @@ pub(crate) fn find_yaml_key_line(
         })
 }
 
-pub(crate) fn yaml_block_end(lines: &[String], start: usize, parent_indent: usize) -> usize {
+fn yaml_block_end(lines: &[String], start: usize, parent_indent: usize) -> usize {
     lines[start + 1..]
         .iter()
         .enumerate()
@@ -285,11 +288,7 @@ pub(crate) fn yaml_block_end(lines: &[String], start: usize, parent_indent: usiz
         .unwrap_or(lines.len())
 }
 
-pub(crate) fn rewrite_inline_hermes_enabled(
-    lines: &mut [String],
-    enabled_idx: usize,
-    add_rtk: bool,
-) {
+fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_rtk: bool) {
     let line_ending = yaml_line_ending(&lines[enabled_idx]);
     let raw = yaml_line_without_ending(&lines[enabled_idx]);
     let Some((prefix, rest)) = raw.split_once('[') else {
@@ -329,11 +328,7 @@ pub(crate) fn rewrite_inline_hermes_enabled(
     lines[enabled_idx] = replacement;
 }
 
-pub(crate) fn rewrite_block_hermes_enabled(
-    lines: &mut Vec<String>,
-    enabled_idx: usize,
-    add_rtk: bool,
-) {
+fn rewrite_block_hermes_enabled(lines: &mut Vec<String>, enabled_idx: usize, add_rtk: bool) {
     let enabled_end = hermes_enabled_list_end(lines, enabled_idx);
     let item_indent = hermes_enabled_list_item_indent(lines, enabled_idx, enabled_end);
     let mut kept = Vec::with_capacity(lines.len() + 1);
@@ -384,7 +379,7 @@ pub(crate) fn rewrite_block_hermes_enabled(
     *lines = patched;
 }
 
-pub(crate) fn hermes_enabled_list_end(lines: &[String], enabled_idx: usize) -> usize {
+fn hermes_enabled_list_end(lines: &[String], enabled_idx: usize) -> usize {
     let enabled_indent = yaml_indent(&lines[enabled_idx]);
 
     lines[enabled_idx + 1..]
@@ -409,7 +404,7 @@ pub(crate) fn hermes_enabled_list_end(lines: &[String], enabled_idx: usize) -> u
         .unwrap_or(lines.len())
 }
 
-pub(crate) fn hermes_enabled_list_item_indent(
+fn hermes_enabled_list_item_indent(
     lines: &[String],
     enabled_idx: usize,
     enabled_end: usize,
@@ -421,7 +416,7 @@ pub(crate) fn hermes_enabled_list_item_indent(
         .unwrap_or_else(|| yaml_indent(&lines[enabled_idx]) + 2)
 }
 
-pub(crate) fn hermes_missing_enabled_indents(
+fn hermes_missing_enabled_indents(
     lines: &[String],
     plugins_idx: usize,
     plugins_end: usize,
@@ -455,11 +450,11 @@ pub(crate) fn hermes_missing_enabled_indents(
     (child_indent, item_indent)
 }
 
-pub(crate) fn yaml_line_without_ending(line: &str) -> &str {
+fn yaml_line_without_ending(line: &str) -> &str {
     line.trim_end_matches(['\r', '\n'])
 }
 
-pub(crate) fn yaml_line_ending(line: &str) -> &str {
+fn yaml_line_ending(line: &str) -> &str {
     if line.ends_with("\r\n") {
         "\r\n"
     } else if line.ends_with('\n') {
@@ -469,14 +464,14 @@ pub(crate) fn yaml_line_ending(line: &str) -> &str {
     }
 }
 
-pub(crate) fn yaml_indent(line: &str) -> usize {
+fn yaml_indent(line: &str) -> usize {
     yaml_line_without_ending(line)
         .chars()
         .take_while(|ch| ch.is_whitespace())
         .count()
 }
 
-pub(crate) fn is_yaml_list_item_named(line: &str, expected: &str) -> bool {
+fn is_yaml_list_item_named(line: &str, expected: &str) -> bool {
     let trimmed = yaml_line_without_ending(line).trim();
     let Some(item) = trimmed.strip_prefix("- ") else {
         return false;
@@ -485,15 +480,15 @@ pub(crate) fn is_yaml_list_item_named(line: &str, expected: &str) -> bool {
     normalized_yaml_scalar(item).is_some_and(|item| item == expected)
 }
 
-pub(crate) fn is_yaml_list_item_line(line: &str) -> bool {
+fn is_yaml_list_item_line(line: &str) -> bool {
     yaml_line_without_ending(line).trim().starts_with("- ")
 }
 
-pub(crate) fn is_hermes_plugin_name(value: &str) -> bool {
+fn is_hermes_plugin_name(value: &str) -> bool {
     normalized_yaml_scalar(value).is_some_and(|item| item == HERMES_PLUGIN_NAME)
 }
 
-pub(crate) fn collapse_yaml_list_key_to_empty(line: &str) -> String {
+fn collapse_yaml_list_key_to_empty(line: &str) -> String {
     let raw = yaml_line_without_ending(line);
     let indent = yaml_indent(line);
     let Some((key, suffix)) = raw.split_once(':') else {
@@ -508,27 +503,26 @@ pub(crate) fn collapse_yaml_list_key_to_empty(line: &str) -> String {
     format!("{}: []{}\n", key, comment)
 }
 
-pub(crate) fn normalized_yaml_scalar(value: &str) -> Option<String> {
+fn normalized_yaml_scalar(value: &str) -> Option<String> {
     let without_comment = value.split_once('#').map_or(value, |(item, _)| item);
     let trimmed = without_comment.trim().trim_matches(['\'', '"']);
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub(crate) fn resolve_hermes_home() -> Result<PathBuf> {
+fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
 }
 
-pub(crate) fn resolve_hermes_home_from_env(
+fn resolve_hermes_home_from_env(
     home_dir: Option<PathBuf>,
     hermes_home: Option<OsString>,
 ) -> Result<PathBuf> {
-    if let Some(path) = hermes_home.filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
-    }
-
-    home_dir
-        .map(|home| home.join(HERMES_DIR))
-        .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
+    resolve_config_dir(
+        hermes_home,
+        home_dir,
+        HERMES_DIR,
+        "Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.",
+    )
 }
 
 #[cfg(test)]

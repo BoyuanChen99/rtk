@@ -1,10 +1,14 @@
 //! Vibe agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE,
+    VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
+};
 
 // Vibe integration
 
-pub(crate) fn resolve_vibe_dir() -> Result<PathBuf> {
+fn resolve_vibe_dir() -> Result<PathBuf> {
     resolve_home_subdir(VIBE_DIR)
 }
 
@@ -28,7 +32,7 @@ pub fn run_vibe_mode(
     run_vibe_mode_at(&vibe_dir, hook_only, patch_mode, ctx)
 }
 
-pub(crate) fn run_vibe_mode_at(
+fn run_vibe_mode_at(
     vibe_dir: &Path,
     hook_only: bool,
     patch_mode: PatchMode,
@@ -81,14 +85,14 @@ pub(crate) fn run_vibe_mode_at(
 /// Outcome of `patch_vibe_hooks_toml`. Distinguishes installed / already-present /
 /// skipped so the caller can decide whether the "installed" summary is truthful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VibeHookPatchOutcome {
+enum VibeHookPatchOutcome {
     Installed,
     AlreadyPresent,
     Skipped,
 }
 
 impl VibeHookPatchOutcome {
-    pub(crate) fn summary_verb(self) -> Option<&'static str> {
+    fn summary_verb(self) -> Option<&'static str> {
         match self {
             Self::Installed => Some("installed"),
             Self::AlreadyPresent => Some("already present"),
@@ -101,7 +105,7 @@ impl VibeHookPatchOutcome {
 ///
 /// Uses append-based patching (string level) rather than parse-serialize round-trip
 /// to preserve any user comments and formatting in the file.
-pub(crate) fn patch_vibe_hooks_toml(
+fn patch_vibe_hooks_toml(
     hooks_path: &Path,
     patch_mode: PatchMode,
     ctx: InitContext,
@@ -182,7 +186,7 @@ pub(crate) fn patch_vibe_hooks_toml(
 
 /// TOML entry emitted for the Vibe pre_tool hook. Mirrors the shape documented
 /// at https://docs.mistral.ai/vibe/code/cli/hooks.
-pub(crate) fn vibe_hook_entry() -> String {
+fn vibe_hook_entry() -> String {
     format!(
         r#"[[hooks]]
 name = "{name}"
@@ -209,7 +213,7 @@ description = "Rewrite bash commands through the rtk proxy to save tokens."
 /// installer only ever writes the canonical spacing, and the alternative
 /// (parse-serialize round-trip via toml_edit) would clobber user comments
 /// and formatting in the file.
-pub(crate) fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
+fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
     let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
     content.contains(&needle)
 }
@@ -252,7 +256,7 @@ pub fn uninstall_vibe(ctx: InitContext) -> Result<()> {
 /// Remove the RTK hook entry (and, when non-empty, the surrounding blank
 /// lines) from `~/.vibe/hooks.toml` and the sibling `~/.vibe/prompts/rtk.md`
 /// prompt file. Leaves any other user-declared hooks intact.
-pub(crate) fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -309,7 +313,7 @@ pub(crate) fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec
 /// is set. Returns `None` when the entry is absent, `Some(new_content)` after
 /// removal (with surrounding blank lines collapsed). The scan walks `[[hooks]]`
 /// section boundaries — anything else in the file is preserved verbatim.
-pub(crate) fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
+fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
     let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
     if !content.contains(&needle) {
         return None;

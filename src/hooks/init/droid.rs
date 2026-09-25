@@ -1,6 +1,11 @@
 //! Droid agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOK_COMMAND, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, PRE_TOOL_USE_KEY,
+};
+use std::ffi::OsString;
 
 // Factory Droid support
 
@@ -10,11 +15,13 @@ use super::*;
 /// `.factory` onto it (verified against Droid v0.164.0).
 /// - Global: `$FACTORY_HOME_OVERRIDE/.factory` or `~/.factory`.
 /// - Project: caller passes `.factory` relative to project root.
-pub(crate) fn resolve_droid_dir() -> Result<PathBuf> {
+fn resolve_droid_dir() -> Result<PathBuf> {
     resolve_droid_dir_from_env(dirs::home_dir(), std::env::var_os(DROID_HOME_ENV))
 }
 
-pub(crate) fn resolve_droid_dir_from_env(
+/// Unlike the other agents, `FACTORY_HOME_OVERRIDE` replaces the home directory and
+/// `.factory` is still appended, mirroring Droid's own resolution.
+fn resolve_droid_dir_from_env(
     home_dir: Option<PathBuf>,
     factory_home_override: Option<OsString>,
 ) -> Result<PathBuf> {
@@ -28,14 +35,14 @@ pub(crate) fn resolve_droid_dir_from_env(
 
 /// How hook events are stored in a Droid config file.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DroidLayout {
+enum DroidLayout {
     /// `hooks.json`: the event map (`PreToolUse`, …) is the file's root object.
     Root,
     /// `settings.json`: the event map lives under a top-level `hooks` key.
     Nested,
 }
 
-pub(crate) struct DroidHookFile {
+struct DroidHookFile {
     path: PathBuf,
     layout: DroidLayout,
 }
@@ -44,7 +51,7 @@ pub(crate) struct DroidHookFile {
 /// order: root `hooks.json`, legacy `hooks/hooks.json` (only read when the
 /// root file is absent), then the `hooks` key of `settings.json` (merged
 /// under `hooks.json` per event key).
-pub(crate) fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3] {
+fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3] {
     [
         DroidHookFile {
             path: droid_dir.join(DROID_HOOKS_FILE),
@@ -62,14 +69,14 @@ pub(crate) fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3]
 }
 
 /// The JSON object holding hook events for the given layout, if present.
-pub(crate) fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::Value {
+fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::Value {
     match layout {
         DroidLayout::Root => root,
         DroidLayout::Nested => root.get("hooks").unwrap_or(&serde_json::Value::Null),
     }
 }
 
-pub(crate) fn droid_has_pre_tool_use(root: &serde_json::Value, layout: DroidLayout) -> bool {
+fn droid_has_pre_tool_use(root: &serde_json::Value, layout: DroidLayout) -> bool {
     droid_events(root, layout)
         .get(PRE_TOOL_USE_KEY)
         .and_then(|p| p.as_array())
@@ -89,7 +96,7 @@ pub(crate) fn droid_has_pre_tool_use(root: &serde_json::Value, layout: DroidLayo
 /// 3. else the live `hooks.json`, when one exists;
 /// 4. else create the canonical root `hooks.json` (where Droid's own
 ///    `/hooks` UI writes).
-pub(crate) fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
+fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
     let root = droid_dir.join(DROID_HOOKS_FILE);
     let legacy = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
     let settings = droid_dir.join(DROID_SETTINGS_FILE);
@@ -142,7 +149,7 @@ pub fn run_droid_mode(global: bool, ctx: InitContext) -> Result<()> {
     run_droid_mode_at(&droid_dir, global, ctx)
 }
 
-pub(crate) fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
 
     let target = resolve_droid_install_target(droid_dir)?;
@@ -193,10 +200,8 @@ pub(crate) fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext
 
 /// Insert RTK PreToolUse entry into a Droid hook file.
 /// Returns true if the file was modified.
-pub(crate) fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, .. } = ctx;
     let path = &file.path;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
@@ -209,27 +214,20 @@ pub(crate) fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> R
 
     insert_droid_hook_entry(&mut root, file.layout)?;
 
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
-
-    if dry_run {
-        println!("[dry-run] would patch Droid hook file: {}", path.display());
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
-        return Ok(true);
-    }
-
-    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)?
-        && verbose > 0
-    {
-        eprintln!("Backup: {}", backup_path.display());
-    }
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "Droid hook file",
+        &format!("[dry-run] would patch Droid hook file: {}", path.display()),
+        true,
+        Written::Backup,
+    )?;
     Ok(true)
 }
 
 /// Check if the RTK PreToolUse Execute hook is already in a Droid hook file.
-pub(crate) fn droid_hook_already_present(root: &serde_json::Value, layout: DroidLayout) -> bool {
+fn droid_hook_already_present(root: &serde_json::Value, layout: DroidLayout) -> bool {
     let pre = match droid_events(root, layout)
         .get(PRE_TOOL_USE_KEY)
         .and_then(|p| p.as_array())
@@ -253,10 +251,7 @@ pub(crate) fn droid_hook_already_present(root: &serde_json::Value, layout: Droid
 }
 
 /// Insert the RTK Execute matcher into a Droid hook file.
-pub(crate) fn insert_droid_hook_entry(
-    root: &mut serde_json::Value,
-    layout: DroidLayout,
-) -> Result<()> {
+fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
@@ -339,7 +334,7 @@ pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let mut removed = Vec::new();
     let mut errors = Vec::new();
     for candidate in droid_hook_file_candidates(droid_dir) {
@@ -364,10 +359,7 @@ pub(crate) fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<V
 
 /// Strip the RTK entry from one Droid hook file. Returns true if the file
 /// held an RTK entry (and was rewritten, unless dry-run).
-pub(crate) fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
     let path = &file.path;
 
     let mut root = match read_json_file(path)? {
@@ -379,27 +371,22 @@ pub(crate) fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext
         return Ok(false);
     }
 
-    if dry_run {
-        println!(
+    update_json_file(
+        path,
+        &root,
+        ctx,
+        "Droid hook file",
+        &format!(
             "[dry-run] would remove RTK entry from Droid hook file: {}",
             path.display()
-        );
-    } else {
-        let serialized =
-            serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
-        backup_and_atomic_write(path, &serialized)?;
-
-        if verbose > 0 {
-            eprintln!("Removed RTK hook from {}", path.display());
-        }
-    }
+        ),
+        false,
+        Written::Line(format!("Removed RTK hook from {}", path.display())),
+    )?;
     Ok(true)
 }
 
-pub(crate) fn remove_droid_hook_from_json(
-    root: &mut serde_json::Value,
-    layout: DroidLayout,
-) -> bool {
+fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout) -> bool {
     let events_obj = match layout {
         DroidLayout::Root => root.as_object_mut(),
         DroidLayout::Nested => root.get_mut("hooks").and_then(|h| h.as_object_mut()),
@@ -469,8 +456,6 @@ pub(crate) fn remove_droid_hook_from_json(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    // --- Factory Droid ---
 
     #[test]
     fn test_resolve_droid_dir_prefers_home_override() {

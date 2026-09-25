@@ -1,15 +1,20 @@
 //! Gemini agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::hooks::constants::{
+    BEFORE_TOOL_KEY, GEMINI_DIR, GEMINI_HOOK_FILE, HOOKS_SUBDIR, SETTINGS_JSON,
+};
+
+const GEMINI_MD: &str = "GEMINI.md";
 
 // Gemini CLI support
 
 /// Gemini hook wrapper script — delegates to `rtk hook gemini`
-pub(crate) const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
+const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
 exec rtk hook gemini
 "#;
 
-pub(crate) fn resolve_gemini_dir() -> Result<PathBuf> {
+fn resolve_gemini_dir() -> Result<PathBuf> {
     resolve_home_subdir(GEMINI_DIR)
 }
 
@@ -93,7 +98,7 @@ pub fn run_gemini(
 /// Print the manual-setup instructions for ~/.gemini/settings.json, shared by
 /// PatchMode::Skip and the unparseable-settings fallback in
 /// `patch_gemini_settings`.
-pub(crate) fn print_gemini_manual_setup(settings_path: &Path) {
+fn print_gemini_manual_setup(settings_path: &Path) {
     println!(
         "\nManual setup needed: add RTK hook to {}\n\
          See: https://github.com/rtk-ai/rtk#gemini-cli",
@@ -107,7 +112,7 @@ pub(crate) fn print_gemini_manual_setup(settings_path: &Path) {
 /// (so the caller can tell an honest "hook installed, settings.json NOT
 /// patched" apart from every other reason nothing changed — already
 /// patched, `PatchMode::Skip`, declined at the `Ask` prompt, dry-run).
-pub(crate) fn patch_gemini_settings(
+fn patch_gemini_settings(
     gemini_dir: &Path,
     hook_path: &Path,
     patch_mode: PatchMode,
@@ -243,7 +248,7 @@ pub(crate) fn patch_gemini_settings(
 }
 
 /// Remove Gemini artifacts during uninstall
-pub(crate) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
+pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
