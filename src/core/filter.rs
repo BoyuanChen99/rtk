@@ -159,32 +159,79 @@ static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{
 
 /// Advances triple-quoted string state across one line, returning the delimiter
 /// still open at end of line. The two quote kinds are tracked separately so a
-/// `'''` inside a `"""` string is text rather than a close.
+/// `'''` inside a `"""` string is text rather than a close. Outside a string, a
+/// one-line string literal is skipped whole and a `#` ends the scan, so a `"""`
+/// written inside `'"""'` or after a trailing comment opens nothing. A backslash
+/// escapes the next byte in every kind of string, raw ones included.
 fn advance_triple_quote(line: &str, open: Option<&'static str>) -> Option<&'static str> {
     let bytes = line.as_bytes();
     let mut state = open;
     let mut i = 0;
 
-    while i + 3 <= bytes.len() {
-        let delim = match &bytes[i..i + 3] {
-            b"\"\"\"" => Some("\"\"\""),
-            b"'''" => Some("'''"),
-            _ => None,
-        };
-
-        match (state, delim) {
-            (Some(current), Some(found)) if current == found => {
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if let Some(current) = state {
+            if rest[0] == b'\\' {
+                i += 2;
+            } else if rest.starts_with(current.as_bytes()) {
                 state = None;
                 i += 3;
+            } else {
+                i += 1;
             }
-            (None, Some(found)) => {
-                state = Some(found);
+            continue;
+        }
+
+        match rest[0] {
+            b'#' => break,
+            b'"' if rest.starts_with(b"\"\"\"") => {
+                state = Some("\"\"\"");
                 i += 3;
+            }
+            b'\'' if rest.starts_with(b"'''") => {
+                state = Some("'''");
+                i += 3;
+            }
+            quote @ (b'"' | b'\'') => {
+                let interpolated = has_interpolation_prefix(&bytes[..i]);
+                let mut depth = 0usize;
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'{' if interpolated => {
+                            if depth == 0 && bytes.get(i + 1) == Some(&b'{') {
+                                i += 1;
+                            } else {
+                                depth += 1;
+                            }
+                        }
+                        b'}' if interpolated && depth > 0 => depth -= 1,
+                        b if b == quote && depth == 0 => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
             }
             _ => i += 1,
         }
     }
     state
+}
+
+/// True when the identifier ending at `before` is an f-string or t-string prefix.
+/// A replacement field in those may reuse the outer quote (PEP 701), so the
+/// quote only ends the string outside `{...}`.
+fn has_interpolation_prefix(before: &[u8]) -> bool {
+    let start = before
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |p| p + 1);
+    matches!(
+        before[start..].to_ascii_lowercase().as_slice(),
+        b"f" | b"fr" | b"rf" | b"t" | b"tr" | b"rt"
+    )
 }
 
 /// Python has no block comments. `"""` opens a *string*, which may be a
@@ -622,6 +669,91 @@ x = 1  # trailing comment kept, matching prior behavior
         assert!(!result.contains("# leading comment"));
         assert!(result.contains("import os"));
         assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_triple_quote_in_one_line_string_opens_nothing() {
+        let code = r#"marker = '"""'
+# strip me
+def f():
+    """
+    # prose inside the docstring
+    """
+    return 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(result.contains(r#"marker = '"""'"#));
+        assert!(
+            !result.contains("# strip me"),
+            "a \"\"\" inside a one-line string opened a string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# prose inside the docstring"),
+            "string state inverted, so docstring text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_triple_quote_in_trailing_comment_opens_nothing() {
+        let code = r#"x = 1  # see """
+# strip me
+SCRIPT = """
+# shell comment inside the string
+"""
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a \"\"\" inside a trailing comment opened a string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# shell comment inside the string"),
+            "string state inverted, so string text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_fstring_field_reusing_quote_opens_nothing() {
+        let code = r#"v = f"{"""x"""}"
+# strip me
+w = f"{'"'}" + """
+# inside the string
+"""
+if"{" == v:
+    pass
+# strip me too
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a quote inside an f-string field ended the string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# inside the string"),
+            "string state inverted, so string text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_escaped_quote_does_not_close_string() {
+        let code = r#"s = r"""a\"""
+# still inside the string
+"""
+# strip me
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            result.contains("# still inside the string"),
+            "an escaped quote closed the string early:\n{}",
+            result
+        );
+        assert!(!result.contains("# strip me"));
     }
 
     #[test]

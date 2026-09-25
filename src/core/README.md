@@ -51,7 +51,9 @@ SELECT 1
 """Module doc."""    # opens and closes on one line
 ```
 
-Docstrings are kept at `minimal`; `aggressive` is what drops them.
+Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
+keeps a line inside a string when that line looks like an import or a
+signature.
 
 ## Tracking Database Schema
 
