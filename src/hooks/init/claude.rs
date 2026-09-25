@@ -235,6 +235,9 @@ fn patch_settings_json_command(
 
     insert_hook_entry(&mut root, hook_command)?;
 
+    if !dry_run {
+        ensure_parent_dir(&settings_path)?;
+    }
     update_json_file(
         &settings_path,
         &root,
@@ -1017,6 +1020,57 @@ mod tests {
     }
 
     #[test]
+    fn test_global_default_mode_creates_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            assert!(
+                claude_dir.exists(),
+                "missing Claude config dir must be created"
+            );
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            assert!(
+                claude_dir.join(CLAUDE_MD).exists(),
+                "CLAUDE.md must be created"
+            );
+            assert!(
+                claude_dir.join(SETTINGS_JSON).exists(),
+                "settings.json must be created"
+            );
+        });
+    }
+
+    /// `--opencode` is installed after RTK.md. A missing Claude dir must not
+    /// abort before that install. Unix only: OpenCode resolves through
+    /// `dirs::home_dir()`, which follows `$HOME` on Unix and ignores it on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn test_global_opencode_installs_when_claude_dir_missing() {
+        use crate::hooks::constants::{
+            CONFIG_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, true, InitContext::default()).unwrap();
+
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            let plugin = tmp
+                .path()
+                .join("home")
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(OPENCODE_PLUGIN_FILE);
+            assert!(
+                plugin.exists(),
+                "OpenCode plugin must be installed when ~/.claude was missing"
+            );
+        });
+    }
+
+    #[test]
     fn test_patch_settings_json_tolerates_utf8_bom() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
@@ -1172,6 +1226,28 @@ mod tests {
     }
 
     #[test]
+    fn test_global_hook_only_mode_creates_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            assert!(
+                claude_dir.exists(),
+                "missing Claude config dir must be created"
+            );
+            assert!(
+                !claude_dir.join(RTK_MD).exists(),
+                "RTK.md must NOT be created in hook-only mode"
+            );
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            assert!(
+                settings.contains(CLAUDE_HOOK_COMMAND),
+                "settings.json must contain hook command"
+            );
+        });
+    }
+
+    #[test]
     fn test_run_default_mode_dry_run_writes_nothing() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
@@ -1192,6 +1268,23 @@ mod tests {
             assert!(
                 !claude_dir.join(SETTINGS_JSON).exists(),
                 "dry-run must not create settings.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_default_mode_dry_run_does_not_create_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            let dry = InitContext {
+                dry_run: true,
+                ..Default::default()
+            };
+            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+
+            assert!(
+                !claude_dir.exists(),
+                "dry-run must not create missing Claude config dir"
             );
         });
     }

@@ -515,6 +515,7 @@ fn write_if_changed_internal(
                 println!("[dry-run] content:\n{}", content);
             }
         } else {
+            ensure_parent_dir(path)?;
             atomic_write(path, content)
                 .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
             if verbose > 0 {
@@ -523,6 +524,19 @@ fn write_if_changed_internal(
         }
         Ok(true)
     }
+}
+
+pub(super) fn ensure_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create directory: {}", parent.display()))
 }
 
 /// Resolve the final write target: if `path` is a symlink, follow it so
@@ -1684,6 +1698,24 @@ pub(super) fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
     fs::create_dir_all(&claude_dir).unwrap();
 
     temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&claude_dir), || f(&claude_dir));
+}
+
+#[cfg(test)]
+pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+    let claude_dir = tmp.path().join(CLAUDE_DIR);
+    let home_dir = tmp.path().join("home");
+    assert!(
+        !claude_dir.exists(),
+        "test precondition: Claude config dir must be missing"
+    );
+
+    temp_env::with_vars(
+        [
+            ("CLAUDE_CONFIG_DIR", Some(claude_dir.as_os_str())),
+            ("HOME", Some(home_dir.as_os_str())),
+        ],
+        || f(&claude_dir),
+    );
 }
 
 #[cfg(test)]
